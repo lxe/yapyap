@@ -1,0 +1,27 @@
+[project]
+name = "yapyap"
+version = "0.1.0"
+description = "Fast and simple push-to-talk dictation"
+readme = "README.md"
+authors = [
+    { name = "Aleksey Smolenchuk", email = "lxe@lxe.co" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.3.2",
+    "sounddevice>=0.5.2",
+    "soundfile>=0.13.1",
+    "scipy>=1.16.1",
+    "pywhispercpp",
+    "evdev>=1.9.2",
+]
+
+[project.scripts]
+yapyap = "yapyap.yapyap:main"
+
+[build-system]
+requires = ["uv_build>=0.8.4,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources.pywhispercpp]
+git = "https://github.com/lxe/pywhispercpp"
