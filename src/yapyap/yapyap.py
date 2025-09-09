@@ -4,9 +4,9 @@ import os
 import numpy as np
 import scipy.signal
 import sounddevice as sd
-from pywhispercpp.model import Model
 from evdev import ecodes
 from .keyboard import monitor_keyboard_events
+from .model import create_model
 
 def parse_chord(chord_str):
     if not chord_str:
@@ -15,7 +15,7 @@ def parse_chord(chord_str):
 
 CHORD = parse_chord(os.environ.get("CHORD"))
 WHISPER_SAMPLERATE = 16000
-MODEL_NAME = os.getenv('MODEL', 'large-v3-turbo-q8_0')
+MODEL_NAME = os.getenv('MODEL', 'nvidia/parakeet-tdt-0.6b-v3')
 
 class VoiceRecorder:
     def __init__(self):
@@ -24,9 +24,8 @@ class VoiceRecorder:
         self.audio_data = None
         self.stream = None
         
-        # Initialize Whisper model
-        print(f"Loading Whisper model: {MODEL_NAME}", file=sys.stderr)
-        self.model = Model(MODEL_NAME, language="auto")
+        # Initialize model
+        self.model = create_model(MODEL_NAME, language="auto", engine="parakeet")
 
         # Can't default this to 16000, because some audio libs can't handle it
         self.samplerate = int(sd.query_devices(kind="input")["default_samplerate"])
