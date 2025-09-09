@@ -1,5 +1,7 @@
 # yapyap - Fast and simple push to talk dictation
 
+https://github.com/user-attachments/assets/208f949a-3d26-46b5-9b64-52b273e1b00b
+
 When you press and hold a specific key combination (`left ctrl + alt` by default), it records audio and automatically transcribes it to text using [whisper.cpp](https://github.com/ggml-org/whisper.cpp), then flushes the transcription to stdout, so you can do whatever with it, like:
 
 ```bash
