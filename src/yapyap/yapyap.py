@@ -4,7 +4,6 @@ import os
 import numpy as np
 import scipy.signal
 import sounddevice as sd
-from evdev import ecodes
 from .keyboard import monitor_keyboard_events
 from .model import create_model
 
@@ -15,7 +14,8 @@ def parse_chord(chord_str):
 
 CHORD = parse_chord(os.environ.get("CHORD"))
 WHISPER_SAMPLERATE = 16000
-MODEL_NAME = os.getenv('MODEL', 'nvidia/parakeet-tdt-0.6b-v3')
+# Default model depends on platform - will be set by engine selection
+MODEL_NAME = os.getenv('MODEL')
 
 class VoiceRecorder:
     def __init__(self):
@@ -24,8 +24,17 @@ class VoiceRecorder:
         self.audio_data = None
         self.stream = None
         
-        # Initialize model
-        self.model = create_model(MODEL_NAME, language="auto", engine="parakeet")
+        # Initialize model - choose best engine for platform
+        import platform
+        if platform.system() == "Darwin" and platform.machine() == "arm64":
+            # Use MLX-optimized Parakeet on Apple Silicon
+            default_engine = 'parakeet-mlx'
+        else:
+            # Use full NeMo Parakeet on other platforms
+            default_engine = 'parakeet'
+        
+        engine = os.getenv('ENGINE', default_engine)
+        self.model = create_model(MODEL_NAME, language="auto", engine=engine)
 
         # Can't default this to 16000, because some audio libs can't handle it
         self.samplerate = int(sd.query_devices(kind="input")["default_samplerate"])
@@ -75,21 +84,37 @@ class VoiceRecorder:
             else:
                 print("(no speech detected)", file=sys.stderr)
 
-    def handle_key(self, key_code, pressed):
-        key_name = ecodes.bytype[ecodes.EV_KEY][key_code]
-        if isinstance(key_name, list):
-            key_name = key_name[0]  
+    def handle_key(self, key_name, pressed):
+        # key_name is already in the correct format (e.g., "KEY_LEFTCTRL")
+        debug_keys = os.getenv('DEBUG_KEYS', '').lower() in ('1', 'true', 'yes')
+        
+        if debug_keys:
+            print(f"DEBUG: handle_key called with key_name='{key_name}', pressed={pressed}", file=sys.stderr)
+            print(f"DEBUG: CHORD={CHORD}, pressed_keys={self.pressed_keys}", file=sys.stderr)
         
         if key_name in CHORD:
+            if debug_keys:
+                print(f"DEBUG: Key {key_name} is in CHORD", file=sys.stderr)
             if pressed:
                 self.pressed_keys.add(key_name)
+                if debug_keys:
+                    print(f"DEBUG: Added key, pressed_keys now: {self.pressed_keys}", file=sys.stderr)
             else:
                 self.pressed_keys.discard(key_name)
+                if debug_keys:
+                    print(f"DEBUG: Removed key, pressed_keys now: {self.pressed_keys}", file=sys.stderr)
 
             if CHORD.issubset(self.pressed_keys):
+                if debug_keys:
+                    print(f"DEBUG: CHORD is subset of pressed_keys - starting recording", file=sys.stderr)
                 self.start_recording()
             else:
+                if debug_keys:
+                    print(f"DEBUG: CHORD is NOT subset of pressed_keys - stopping recording", file=sys.stderr)
                 self.stop_recording()
+        else:
+            if debug_keys:
+                print(f"DEBUG: Key {key_name} is NOT in CHORD", file=sys.stderr)
 
 def main():
     recorder = VoiceRecorder()

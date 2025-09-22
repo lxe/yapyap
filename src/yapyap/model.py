@@ -49,7 +49,7 @@ def create_model(model_name: str = None, language: str = "auto", engine: str = "
     Args:
         model_name: Name of the model to load
         language: Language for transcription
-        engine: Model engine to use ("whisper", "parakeet")
+        engine: Model engine to use ("whisper", "parakeet", "parakeet-mlx")
         
     Returns:
         Model instance
@@ -59,6 +59,8 @@ def create_model(model_name: str = None, language: str = "auto", engine: str = "
             model_name = os.getenv('MODEL', 'large-v3-turbo-q8_0')
         elif engine == "parakeet":
             model_name = os.getenv('MODEL', 'nvidia/parakeet-tdt-0.6b-v3')
+        elif engine == "parakeet-mlx":
+            model_name = os.getenv('MODEL', 'mlx-community/parakeet-tdt-0.6b-v3')
         else:
             model_name = os.getenv('MODEL', 'large-v3-turbo-q8_0')
     
@@ -68,5 +70,8 @@ def create_model(model_name: str = None, language: str = "auto", engine: str = "
     elif engine == "parakeet":
         from .parakeet_model import ParakeetModel
         return ParakeetModel(model_name, language)
+    elif engine == "parakeet-mlx":
+        from .parakeet_mlx_model import ParakeetMLXModel
+        return ParakeetMLXModel(model_name, language)
     else:
-        raise ValueError(f"Unsupported model engine: {engine}. Supported engines: 'whisper', 'parakeet'")
+        raise ValueError(f"Unsupported model engine: {engine}. Supported engines: 'whisper', 'parakeet', 'parakeet-mlx'")
