@@ -26,7 +26,11 @@ class VoiceRecorder:
         
         # Initialize Whisper model
         print(f"Loading Whisper model: {MODEL_NAME}", file=sys.stderr)
-        self.model = Model(MODEL_NAME, language="auto")
+        if ".en" in MODEL_NAME:
+            language = "en"
+        else:
+            language = "auto"
+        self.model = Model(MODEL_NAME, language=language)
 
         # Can't default this to 16000, because some audio libs can't handle it
         self.samplerate = int(sd.query_devices(kind="input")["default_samplerate"])
