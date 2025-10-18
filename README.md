@@ -71,7 +71,15 @@ You can perform actions on the output:
 yapyap | while read l; do echo "do whatever you want with $l"; done
 ```
 
-Practical example: copy and paste anywhere on hyprland:
+Practical examples:
+
+Copy to clipboard and type directly (works with any Wayland compositor):
+
+```bash
+yapyap | while read l; do wl-copy -- $l; wtype $l; done
+```
+
+Copy and paste on Hyprland:
 
 ```bash
 yapyap | while read l; do wl-copy -- $l && hyprctl dispatch sendshortcut 'CTRL+SHIFT,V,'; done
