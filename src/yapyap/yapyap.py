@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import base64
-import sys
 import os
+import sys
 import ctypes
 import ctypes.util
 import importlib.util
@@ -13,8 +13,10 @@ import threading
 import time
 import tempfile
 
+REMOTE_HOST = os.environ.get("YAPYAP_REMOTE_HOST", "").strip() or None
+
 # pywhispercpp installs libwhisper.so + libggml*.so into site-packages but the linker can't find them
-if not ctypes.util.find_library("whisper"):
+if not REMOTE_HOST and not ctypes.util.find_library("whisper"):
     _spec = importlib.util.find_spec("_pywhispercpp")
     if _spec and _spec.origin:
         _site_dir = os.path.dirname(_spec.origin)
@@ -25,9 +27,8 @@ if not ctypes.util.find_library("whisper"):
 import numpy as np
 import scipy.signal
 import sounddevice as sd
-from pywhispercpp.model import Model
 from evdev import ecodes
-from .ipc import SOCKET_PATH, tcp_bind_address
+from .ipc import SOCKET_PATH, request_transcription, tcp_bind_address
 from .keyboard import monitor_keyboard_events
 
 def parse_chord(chord_str):
@@ -41,6 +42,7 @@ MODEL_NAME = os.getenv('MODEL', 'large-v3-turbo-q8_0')
 WAYBAR_SIGNAL = os.environ.get("YAPYAP_WAYBAR_SIGNAL")
 SERVER_ONLY = os.environ.get("YAPYAP_SERVER_ONLY", "").lower() in {"1", "true", "yes", "on"}
 TCP_BIND = tcp_bind_address()
+REMOTE_UNREACHABLE_TEXT = "[remove server unreachable]"
 
 
 def default_state_path():
@@ -73,6 +75,7 @@ class RuntimeState:
             "state_path": self.path,
             "model": MODEL_NAME,
             "chord": sorted(CHORD),
+            "remote_host": REMOTE_HOST,
         }
 
     def update(self, **changes):
@@ -160,6 +163,26 @@ def load_audio_bytes(audio_bytes, filename):
     return audio, timings
 
 
+def load_pcm16_bytes(audio_bytes, samplerate):
+    timings = {}
+    start = time.perf_counter()
+    audio = np.frombuffer(audio_bytes, dtype=np.int16)
+    timings["decode_pcm_s16le_s"] = time.perf_counter() - start
+    audio = (audio.astype(np.float32) / 32768.0).flatten()
+
+    if samplerate != WHISPER_SAMPLERATE:
+        print(f"Resampling {samplerate}Hz -> {WHISPER_SAMPLERATE}Hz", file=sys.stderr)
+        resample_start = time.perf_counter()
+        num_samples = int(len(audio) * WHISPER_SAMPLERATE / samplerate)
+        audio = scipy.signal.resample(audio, num_samples)
+        timings["resample_s"] = time.perf_counter() - resample_start
+
+    timings["prepare_audio_s"] = 0.0
+    timings["load_audio_total_s"] = time.perf_counter() - start
+    timings["uploaded_bytes"] = len(audio_bytes)
+    return audio, timings
+
+
 class TranscriptionServer:
     def __init__(self, recorder, socket_path, tcp_bind):
         self.recorder = recorder
@@ -227,7 +250,11 @@ class TranscriptionServer:
                 return
             payload = json.loads(request)
             trace = payload.get("trace", False)
-            if "audio_b64" in payload:
+            if payload.get("audio_encoding") == "pcm_s16le":
+                audio_bytes = base64.b64decode(payload["audio_b64"])
+                samplerate = int(payload["samplerate"])
+                text, timings = self.recorder.transcribe_pcm16(audio_bytes, samplerate, trace=trace)
+            elif "audio_b64" in payload:
                 audio_bytes = base64.b64decode(payload["audio_b64"])
                 filename = payload.get("filename", "uploaded audio")
                 text, timings = self.recorder.transcribe_bytes(audio_bytes, filename, trace=trace)
@@ -258,10 +285,17 @@ class VoiceRecorder:
         self.stream = None
         self.model_lock = threading.Lock()
         self.samplerate = None
+        self.remote_host = REMOTE_HOST
+        self.model = None
         
-        # Initialize Whisper model
-        print(f"Loading Whisper model: {MODEL_NAME}", file=sys.stderr)
-        self.model = Model(MODEL_NAME, language="auto")
+        if self.remote_host:
+            print(f"Using remote transcription server: {self.remote_host}", file=sys.stderr)
+        else:
+            from pywhispercpp.model import Model
+
+            # Initialize Whisper model
+            print(f"Loading Whisper model: {MODEL_NAME}", file=sys.stderr)
+            self.model = Model(MODEL_NAME, language="auto")
 
         if self.enable_input:
             # Can't default this to 16000, because some audio libs can't handle it
@@ -348,8 +382,11 @@ class VoiceRecorder:
                     print("(no speech detected)", file=sys.stderr)
             except Exception as e:
                 print(f"❌ Transcription error: {e}", file=sys.stderr)
-                import traceback
-                traceback.print_exc()
+                if self.remote_host:
+                    print(REMOTE_UNREACHABLE_TEXT, flush=True)
+                else:
+                    import traceback
+                    traceback.print_exc()
 
     def handle_key(self, key_code, pressed):
         key_name = ecodes.bytype[ecodes.EV_KEY][key_code]
@@ -370,6 +407,9 @@ class VoiceRecorder:
                 self.stop_recording()
 
     def transcribe_audio(self, audio, trace=False):
+        if self.remote_host:
+            return self.transcribe_audio_remote(audio, trace=trace)
+
         start = time.perf_counter()
         with self.model_lock:
             inference_start = time.perf_counter()
@@ -383,8 +423,47 @@ class VoiceRecorder:
         }
         return text, timings
 
+    def transcribe_audio_remote(self, audio, trace=False):
+        encode_start = time.perf_counter()
+        pcm16 = np.clip(audio, -1.0, 1.0)
+        pcm16 = (pcm16 * 32767.0).astype(np.int16)
+        payload = {
+            "trace": trace,
+            "audio_b64": base64.b64encode(pcm16.tobytes()).decode("ascii"),
+            "audio_encoding": "pcm_s16le",
+            "samplerate": WHISPER_SAMPLERATE,
+            "channels": 1,
+        }
+        encode_time = time.perf_counter() - encode_start
+        response, client_timings = request_transcription(payload, host=self.remote_host)
+        if "error" in response:
+            raise RuntimeError(response["error"])
+
+        timings = {
+            "encode_pcm_s16le_s": encode_time,
+            **client_timings,
+        }
+        if trace:
+            timings.update(response.get("timings", {}))
+        return response.get("text", ""), timings
+
     def transcribe_path(self, path, trace=False):
         print("🎯 Transcribing file request...", file=sys.stderr)
+        if self.remote_host:
+            with open(path, "rb") as handle:
+                payload = {
+                    "trace": trace,
+                    "audio_b64": base64.b64encode(handle.read()).decode("ascii"),
+                    "filename": os.path.basename(path),
+                }
+            response, client_timings = request_transcription(payload, host=self.remote_host)
+            if "error" in response:
+                raise RuntimeError(response["error"])
+            timings = {**client_timings}
+            if trace:
+                timings.update(response.get("timings", {}))
+            return response.get("text", ""), timings
+
         start = time.perf_counter()
         audio, load_timings = load_audio_file(path)
         text, transcribe_timings = self.transcribe_audio(audio, trace=trace)
@@ -397,8 +476,34 @@ class VoiceRecorder:
 
     def transcribe_bytes(self, audio_bytes, filename, trace=False):
         print("🎯 Transcribing uploaded file request...", file=sys.stderr)
+        if self.remote_host:
+            payload = {
+                "trace": trace,
+                "audio_b64": base64.b64encode(audio_bytes).decode("ascii"),
+                "filename": filename,
+            }
+            response, client_timings = request_transcription(payload, host=self.remote_host)
+            if "error" in response:
+                raise RuntimeError(response["error"])
+            timings = {**client_timings}
+            if trace:
+                timings.update(response.get("timings", {}))
+            return response.get("text", ""), timings
+
         start = time.perf_counter()
         audio, load_timings = load_audio_bytes(audio_bytes, filename)
+        text, transcribe_timings = self.transcribe_audio(audio, trace=trace)
+        timings = {
+            **load_timings,
+            **transcribe_timings,
+            "server_total_s": time.perf_counter() - start,
+        }
+        return text, timings
+
+    def transcribe_pcm16(self, audio_bytes, samplerate, trace=False):
+        print("🎯 Transcribing uploaded pcm16 request...", file=sys.stderr)
+        start = time.perf_counter()
+        audio, load_timings = load_pcm16_bytes(audio_bytes, samplerate)
         text, transcribe_timings = self.transcribe_audio(audio, trace=trace)
         timings = {
             **load_timings,

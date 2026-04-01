@@ -1,5 +1,8 @@
+import json
 import os
+import socket
 import tempfile
+import time
 
 
 def default_socket_path():
@@ -41,3 +44,31 @@ def tcp_bind_address():
         raise ValueError("YAPYAP_TCP_PORT is required when YAPYAP_TCP_HOST is set")
 
     return parse_hostport(f"{host}:{port_text}")
+
+
+def request_transcription(payload, *, host=None, socket_path=SOCKET_PATH, timeout=30):
+    if host:
+        host_name, port = parse_hostport(host)
+        family = socket.AF_INET
+        address = (host_name, port)
+    else:
+        family = socket.AF_UNIX
+        address = socket_path
+
+    with socket.socket(family, socket.SOCK_STREAM) as client:
+        client.settimeout(timeout)
+        connect_start = time.perf_counter()
+        client.connect(address)
+        connect_time = time.perf_counter() - connect_start
+        request_start = time.perf_counter()
+        client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+        response = client.makefile("r", encoding="utf-8").readline()
+        roundtrip_time = time.perf_counter() - request_start
+
+    if not response:
+        raise ConnectionError("No response received from transcription server")
+
+    return json.loads(response), {
+        "client_connect_s": connect_time,
+        "client_request_roundtrip_s": roundtrip_time,
+    }
