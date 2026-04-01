@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 yapyap = "yapyap.yapyap:main"
 yapyap-cli = "yapyap.cli_client:main"
+yapyap-install-service = "yapyap.service_install:main"
 
 [build-system]
 requires = ["uv_build>=0.8.4,<0.9.0"]

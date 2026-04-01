@@ -45,6 +45,21 @@ For CPU only (not recommended):
 uv tool install --reinstall git+https://github.com/lxe/yapyap
 ```
 
+To install the background user service and managed wrapper:
+
+```bash
+yapyap-install-service
+```
+
+That command writes:
+
+- `~/.config/systemd/user/yapyap.service`
+- `~/.local/bin/yapyap-runner`
+- `~/.config/yapyap/env` (only if it does not already exist)
+
+Then it runs `systemctl --user daemon-reload`, enables `yapyap.service`, and restarts it.
+Re-run `yapyap-install-service` after upgrading `yapyap` to refresh the generated files.
+
 ## Usage
 
 Press a chord, (`KEY_LEFTCTRL,KEY_LEFTALT` by default), speak, release the keys, and it will flush the transcription to stdout:
@@ -53,6 +68,8 @@ Press a chord, (`KEY_LEFTCTRL,KEY_LEFTALT` by default), speak, release the keys,
 yapyap
 ```
 
+If you are using the user service, the generated runner copies each transcript to the clipboard and, on Hyprland, pastes it into the active window. Outside that setup, run `yapyap` directly and pipe stdout into whatever action you want.
+
 While `yapyap` is running, `yapyap-cli` can send file transcription requests to the already-loaded model:
 
 ```bash
@@ -60,6 +77,29 @@ yapyap-cli file.ogg
 ```
 
 `yapyap-cli` requires a running `yapyap` process and will fail if the background socket is not available.
+
+The managed service uses `~/.config/yapyap/env` for overrides. Common settings:
+
+```bash
+CHORD=KEY_LEFTCTRL,KEY_LEFTALT
+MODEL=large-v3-turbo-q8_0
+YAPYAP_WAYBAR_SIGNAL=11
+YAPYAP_AUTO_PASTE=1
+YAPYAP_PASTE_DELAY=0.05
+```
+
+After editing that file, reload the service:
+
+```bash
+systemctl --user restart yapyap
+```
+
+Useful service commands:
+
+```bash
+systemctl --user status yapyap
+journalctl --user -u yapyap -f
+```
 
 You can change the [key combination](https://gitlab.freedesktop.org/libevdev/evtest/-/blob/master/evtest.c?ref_type=heads#L224):
 
