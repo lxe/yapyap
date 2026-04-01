@@ -78,12 +78,21 @@ yapyap-cli file.ogg
 
 `yapyap-cli` requires a running `yapyap` process and will fail if the background socket is not available.
 
+For a remote server, use TCP and `yapyap-cli` will upload the audio file contents instead of sending a local path:
+
+```bash
+yapyap-cli --host 192.168.0.2:8122 --trace file.ogg
+```
+
 The managed service uses `~/.config/yapyap/env` for overrides. Common settings:
 
 ```bash
 CHORD=KEY_LEFTCTRL,KEY_LEFTALT
 MODEL=large-v3-turbo-q8_0
 YAPYAP_WAYBAR_SIGNAL=11
+YAPYAP_SERVER_ONLY=1
+YAPYAP_TCP_HOST=0.0.0.0
+YAPYAP_TCP_PORT=8122
 YAPYAP_AUTO_PASTE=1
 YAPYAP_PASTE_DELAY=0.05
 ```

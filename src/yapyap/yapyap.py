@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+import base64
 import sys
 import os
 import ctypes
 import ctypes.util
 import importlib.util
+import io
 import json
 import socket
 import subprocess
@@ -25,7 +27,7 @@ import scipy.signal
 import sounddevice as sd
 from pywhispercpp.model import Model
 from evdev import ecodes
-from .ipc import SOCKET_PATH
+from .ipc import SOCKET_PATH, tcp_bind_address
 from .keyboard import monitor_keyboard_events
 
 def parse_chord(chord_str):
@@ -37,6 +39,8 @@ CHORD = parse_chord(os.environ.get("CHORD"))
 WHISPER_SAMPLERATE = 16000
 MODEL_NAME = os.getenv('MODEL', 'large-v3-turbo-q8_0')
 WAYBAR_SIGNAL = os.environ.get("YAPYAP_WAYBAR_SIGNAL")
+SERVER_ONLY = os.environ.get("YAPYAP_SERVER_ONLY", "").lower() in {"1", "true", "yes", "on"}
+TCP_BIND = tcp_bind_address()
 
 
 def default_state_path():
@@ -49,6 +53,13 @@ def default_state_path():
 STATE_PATH = os.environ.get("YAPYAP_STATE", default_state_path())
 
 
+def listener_label():
+    if TCP_BIND:
+        host, port = TCP_BIND
+        return f"tcp://{host}:{port}"
+    return SOCKET_PATH
+
+
 class RuntimeState:
     def __init__(self, path):
         self.path = path
@@ -57,7 +68,8 @@ class RuntimeState:
             "active": False,
             "recording": False,
             "pid": os.getpid(),
-            "socket_path": SOCKET_PATH,
+            "socket_path": SOCKET_PATH if not TCP_BIND else None,
+            "listen": listener_label(),
             "state_path": self.path,
             "model": MODEL_NAME,
             "chord": sorted(CHORD),
@@ -120,38 +132,76 @@ def load_audio_file(path):
     return audio, timings
 
 
+def load_audio_bytes(audio_bytes, filename):
+    import soundfile as sf
+
+    timings = {}
+    start = time.perf_counter()
+    print(f"Reading uploaded audio: {filename}", file=sys.stderr)
+    read_start = time.perf_counter()
+    audio, samplerate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+    timings["read_file_s"] = time.perf_counter() - read_start
+
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+
+    if samplerate != WHISPER_SAMPLERATE:
+        print(f"Resampling {samplerate}Hz -> {WHISPER_SAMPLERATE}Hz", file=sys.stderr)
+        resample_start = time.perf_counter()
+        num_samples = int(len(audio) * WHISPER_SAMPLERATE / samplerate)
+        audio = scipy.signal.resample(audio, num_samples)
+        timings["resample_s"] = time.perf_counter() - resample_start
+
+    convert_start = time.perf_counter()
+    audio = audio.astype(np.float32).flatten()
+    timings["prepare_audio_s"] = time.perf_counter() - convert_start
+    timings["load_audio_total_s"] = time.perf_counter() - start
+    timings["uploaded_bytes"] = len(audio_bytes)
+    return audio, timings
+
+
 class TranscriptionServer:
-    def __init__(self, recorder, socket_path):
+    def __init__(self, recorder, socket_path, tcp_bind):
         self.recorder = recorder
         self.socket_path = socket_path
+        self.tcp_bind = tcp_bind
         self.server = None
         self.thread = None
         self.running = False
 
     def start(self):
-        if os.path.exists(self.socket_path):
-            try:
-                os.unlink(self.socket_path)
-            except OSError as e:
-                print(f"Failed to remove stale socket {self.socket_path}: {e}", file=sys.stderr)
-                raise
+        if self.tcp_bind:
+            host, port = self.tcp_bind
+            self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server.bind((host, port))
+            endpoint_label = f"tcp://{host}:{port}"
+        else:
+            if os.path.exists(self.socket_path):
+                try:
+                    os.unlink(self.socket_path)
+                except OSError as e:
+                    print(f"Failed to remove stale socket {self.socket_path}: {e}", file=sys.stderr)
+                    raise
 
-        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.server.bind(self.socket_path)
-        os.chmod(self.socket_path, 0o600)
+            self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.server.bind(self.socket_path)
+            os.chmod(self.socket_path, 0o600)
+            endpoint_label = self.socket_path
+
         self.server.listen()
         self.server.settimeout(1.0)
         self.running = True
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
         self.thread.start()
-        print(f"CLI socket listening on {self.socket_path}", file=sys.stderr)
+        print(f"CLI socket listening on {endpoint_label}", file=sys.stderr)
 
     def stop(self):
         self.running = False
         if self.server:
             self.server.close()
             self.server = None
-        if os.path.exists(self.socket_path):
+        if not self.tcp_bind and os.path.exists(self.socket_path):
             os.unlink(self.socket_path)
 
     def serve_forever(self):
@@ -176,9 +226,14 @@ class TranscriptionServer:
             if not request:
                 return
             payload = json.loads(request)
-            path = payload["path"]
             trace = payload.get("trace", False)
-            text, timings = self.recorder.transcribe_path(path, trace=trace)
+            if "audio_b64" in payload:
+                audio_bytes = base64.b64decode(payload["audio_b64"])
+                filename = payload.get("filename", "uploaded audio")
+                text, timings = self.recorder.transcribe_bytes(audio_bytes, filename, trace=trace)
+            else:
+                path = payload["path"]
+                text, timings = self.recorder.transcribe_path(path, trace=trace)
             response = {"text": text}
             if trace:
                 response["timings"] = timings
@@ -329,7 +384,19 @@ class VoiceRecorder:
         print("🎯 Transcribing file request...", file=sys.stderr)
         start = time.perf_counter()
         audio, load_timings = load_audio_file(path)
-        text, transcribe_timings = self.transcribe_audio(audio, trace=True)
+        text, transcribe_timings = self.transcribe_audio(audio, trace=trace)
+        timings = {
+            **load_timings,
+            **transcribe_timings,
+            "server_total_s": time.perf_counter() - start,
+        }
+        return text, timings
+
+    def transcribe_bytes(self, audio_bytes, filename, trace=False):
+        print("🎯 Transcribing uploaded file request...", file=sys.stderr)
+        start = time.perf_counter()
+        audio, load_timings = load_audio_bytes(audio_bytes, filename)
+        text, transcribe_timings = self.transcribe_audio(audio, trace=trace)
         timings = {
             **load_timings,
             **transcribe_timings,
@@ -339,14 +406,21 @@ class VoiceRecorder:
 def main():
     runtime_state = RuntimeState(STATE_PATH)
     recorder = VoiceRecorder(runtime_state)
-    server = TranscriptionServer(recorder, SOCKET_PATH)
+    server = TranscriptionServer(recorder, SOCKET_PATH, TCP_BIND)
     server.start()
     runtime_state.update(active=True, recording=False)
 
-    print(f"Press {', '.join(CHORD)} to record voice", file=sys.stderr)
+    if SERVER_ONLY:
+        print(f"Running in server-only mode on {listener_label()}", file=sys.stderr)
+    else:
+        print(f"Press {', '.join(CHORD)} to record voice", file=sys.stderr)
 
     try:
-        monitor_keyboard_events(recorder.handle_key)
+        if SERVER_ONLY:
+            while True:
+                time.sleep(3600)
+        else:
+            monitor_keyboard_events(recorder.handle_key)
     except KeyboardInterrupt:
         print("\nStopped.", file=sys.stderr)
         if recorder.recording:
