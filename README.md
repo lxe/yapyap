@@ -53,6 +53,14 @@ Press a chord, (`KEY_LEFTCTRL,KEY_LEFTALT` by default), speak, release the keys,
 yapyap
 ```
 
+While `yapyap` is running, `yapyap-cli` can send file transcription requests to the already-loaded model:
+
+```bash
+yapyap-cli file.ogg
+```
+
+`yapyap-cli` requires a running `yapyap` process and will fail if the background socket is not available.
+
 You can change the [key combination](https://gitlab.freedesktop.org/libevdev/evtest/-/blob/master/evtest.c?ref_type=heads#L224):
 
 ```bash

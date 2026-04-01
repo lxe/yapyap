@@ -193,8 +193,8 @@ wheels = [
 
 [[package]]
 name = "pywhispercpp"
-version = "0.1.dev215+g50f644575"
-source = { git = "https://github.com/lxe/pywhispercpp#50f64457573079d8ec31f6d90e782eb378c35db9" }
+version = "0.1.dev221+g32fee4fcf"
+source = { git = "https://github.com/lxe/pywhispercpp#32fee4fcf83182268d13e10aa39ff5d5d2f4993f" }
 dependencies = [
     { name = "numpy" },
     { name = "platformdirs" },
