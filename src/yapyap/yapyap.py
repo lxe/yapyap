@@ -249,23 +249,26 @@ class TranscriptionServer:
             print("CLI client disconnected before receiving response", file=sys.stderr)
 
 class VoiceRecorder:
-    def __init__(self, runtime_state):
+    def __init__(self, runtime_state, enable_input=True):
         self.runtime_state = runtime_state
+        self.enable_input = enable_input
         self.pressed_keys = set()
         self.recording = False
         self.audio_data = None
         self.stream = None
         self.model_lock = threading.Lock()
+        self.samplerate = None
         
         # Initialize Whisper model
         print(f"Loading Whisper model: {MODEL_NAME}", file=sys.stderr)
         self.model = Model(MODEL_NAME, language="auto")
 
-        # Can't default this to 16000, because some audio libs can't handle it
-        self.samplerate = int(sd.query_devices(kind="input")["default_samplerate"])
-        print(f"Samplerate: {self.samplerate}", file=sys.stderr)
-        sd.default.samplerate = self.samplerate
-        sd.default.channels = 1
+        if self.enable_input:
+            # Can't default this to 16000, because some audio libs can't handle it
+            self.samplerate = int(sd.query_devices(kind="input")["default_samplerate"])
+            print(f"Samplerate: {self.samplerate}", file=sys.stderr)
+            sd.default.samplerate = self.samplerate
+            sd.default.channels = 1
 
     def audio_callback(self, indata, frames, time, status):
         if status:
@@ -405,7 +408,7 @@ class VoiceRecorder:
         return text, timings
 def main():
     runtime_state = RuntimeState(STATE_PATH)
-    recorder = VoiceRecorder(runtime_state)
+    recorder = VoiceRecorder(runtime_state, enable_input=not SERVER_ONLY)
     server = TranscriptionServer(recorder, SOCKET_PATH, TCP_BIND)
     server.start()
     runtime_state.update(active=True, recording=False)
