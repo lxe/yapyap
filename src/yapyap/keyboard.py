@@ -2,6 +2,7 @@
 import sys
 import evdev
 import select
+import time
 from evdev import ecodes
 
 def get_keyboard_devices():
@@ -27,6 +28,31 @@ def monitor_keyboard_events(key_handler):
     devices = get_keyboard_devices()
     print(f"Monitoring {len(devices)} keyboard device(s)", file=sys.stderr)
     device_map = {device.fd: device for device in devices}
+
+    # evdev can expose key events that were already queued when the service
+    # opened the devices. Do not let those stale events start a recording.
+    drain_deadline = time.monotonic() + 0.25
+    drained_events = 0
+    while time.monotonic() < drain_deadline:
+        try:
+            ready, _, _ = select.select(device_map.keys(), [], [], 0.01)
+        except (OSError, IOError):
+            break
+
+        if not ready:
+            continue
+
+        for fd in ready:
+            device = device_map.get(fd)
+            if not device:
+                continue
+            try:
+                drained_events += sum(1 for _ in device.read())
+            except (BlockingIOError, OSError, IOError):
+                continue
+
+    if drained_events:
+        print(f"Drained {drained_events} startup keyboard event(s)", file=sys.stderr)
     
     while True:
         try:
