@@ -25,6 +25,11 @@ ENV_TEMPLATE = """# Optional overrides for the yapyap user service.
 # YAPYAP_TCP_HOST=0.0.0.0
 # YAPYAP_TCP_PORT=8122
 # YAPYAP_REMOTE_HOST=192.168.0.102:8122
+# YAPYAP_INPUT_DEVICE=default
+# YAPYAP_DUCK_AUDIO=1
+# YAPYAP_DUCK_VOLUME=0.50
+# YAPYAP_DUCK_FADE_OUT_MS=120
+# YAPYAP_DUCK_FADE_IN_MS=180
 # YAPYAP_AUTO_PASTE=1
 # YAPYAP_PASTE_DELAY=0.05
 """
@@ -32,12 +37,14 @@ ENV_TEMPLATE = """# Optional overrides for the yapyap user service.
 SERVICE_TEMPLATE = """# Managed by `yapyap-install-service`. Re-run that command after upgrades.
 [Unit]
 Description=YapYap dictation pipeline
-After=default.target
+Wants=pipewire.service pipewire-pulse.service wireplumber.service
+After=default.target pipewire.service pipewire-pulse.service wireplumber.service
 
 [Service]
 Type=simple
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-__ENV_FILE__
+ExecStartPre=/usr/bin/bash -lc 'for _ in {1..30}; do source="$(pactl get-default-source 2>/dev/null || true)"; if [ -n "$source" ] && pactl list sources 2>/dev/null | grep -Fq "Name: $source"; then exit 0; fi; sleep 1; done; exit 0'
 ExecStart=__RUNNER_PATH__
 Restart=on-failure
 RestartSec=5
@@ -58,6 +65,7 @@ YAPYAP_BIN=__YAPYAP_BIN__
 PYTHON_BIN=__PYTHON_BIN__
 HYPRCTL_BIN=__HYPRCTL_BIN__
 WLCOPY_BIN=__WLCOPY_BIN__
+WTYPE_BIN=__WTYPE_BIN__
 
 signal_waybar() {
   if [ -n "$WAYBAR_SIGNAL" ]; then
@@ -92,8 +100,49 @@ trap cleanup EXIT
 export YAPYAP_STATE="$STATE_FILE"
 export YAPYAP_WAYBAR_SIGNAL="$WAYBAR_SIGNAL"
 
+refresh_desktop_environment() {
+  local name=""
+  local value=""
+  local socket=""
+  local hypr_socket=""
+
+  while IFS='=' read -r name value; do
+    case "$name" in
+      WAYLAND_DISPLAY|DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|XDG_CURRENT_DESKTOP|XDG_SESSION_TYPE)
+        [ -n "${value:-}" ] && export "$name=$value"
+        ;;
+      XDG_RUNTIME_DIR)
+        [ -n "${value:-}" ] && export XDG_RUNTIME_DIR="$value"
+        ;;
+    esac
+  done < <(systemctl --user show-environment 2>/dev/null || true)
+
+  if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  fi
+
+  if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+    for socket in "$XDG_RUNTIME_DIR"/wayland-*; do
+      [ -S "$socket" ] || continue
+      export WAYLAND_DISPLAY="${socket##*/}"
+      break
+    done
+  fi
+
+  if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && [ -d "$XDG_RUNTIME_DIR/hypr" ]; then
+    for hypr_socket in "$XDG_RUNTIME_DIR"/hypr/*/.socket.sock; do
+      [ -S "$hypr_socket" ] || continue
+      hypr_socket="${hypr_socket%/.socket.sock}"
+      export HYPRLAND_INSTANCE_SIGNATURE="${hypr_socket##*/}"
+      break
+    done
+  fi
+}
+
 active_window_class() {
   local payload=""
+
+  refresh_desktop_environment
 
   if [ -z "$HYPRCTL_BIN" ]; then
     printf '\\n'
@@ -120,23 +169,56 @@ print(str(value).strip().lower())
 ' <<<"$payload" || printf '\\n'
 }
 
+active_window_address() {
+  local payload=""
+
+  refresh_desktop_environment
+
+  if [ -z "$HYPRCTL_BIN" ]; then
+    printf '\\n'
+    return 0
+  fi
+
+  if ! payload="$("$HYPRCTL_BIN" activewindow -j 2>/dev/null)"; then
+    printf '\\n'
+    return 0
+  fi
+
+  "$PYTHON_BIN" -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+value = payload.get("address") or ""
+print(str(value).strip())
+' <<<"$payload" || printf '\\n'
+}
+
 paste_shortcut_for_class() {
   local class_name="${1:-}"
   case "$class_name" in
     kitty|alacritty|foot|wezterm|org.wezfurlong.wezterm|cursor|code)
-      printf '%s\\n' "CTRL+SHIFT,V,"
+      printf '%s\\n' "CTRL+SHIFT,V"
       ;;
     *)
-      printf '%s\\n' "CTRL,V,"
+      printf '%s\\n' "CTRL,V"
       ;;
   esac
 }
 
 "$YAPYAP_BIN" | while IFS= read -r line; do
   local_window_class=""
+  local_window_address=""
   local_paste_shortcut=""
 
   [ -n "$line" ] || continue
+
+  refresh_desktop_environment
 
   if [ -n "$WLCOPY_BIN" ]; then
     if ! "$WLCOPY_BIN" -- "$line"; then
@@ -155,19 +237,42 @@ paste_shortcut_for_class() {
   if ! local_window_class="$(active_window_class)"; then
     local_window_class=""
   fi
+  if ! local_window_address="$(active_window_address)"; then
+    local_window_address=""
+  fi
+  if [ -z "$local_window_address" ]; then
+    printf 'yapyap: no active window address, skipping paste\\n' >&2
+    continue
+  fi
+
+  if [ "$local_window_class" = "com.moonlight_stream.moonlight" ]; then
+    if [ -z "$WTYPE_BIN" ] || [ ! -x "$WTYPE_BIN" ]; then
+      printf 'yapyap: wtype is unavailable, cannot type into Moonlight\\n' >&2
+      continue
+    fi
+    current_window_address="$(active_window_address)"
+    if [ "$current_window_address" != "$local_window_address" ]; then
+      printf 'yapyap: Moonlight lost focus before text injection, skipping typing\\n' >&2
+      continue
+    fi
+    printf 'yapyap: typing transcript through Moonlight keyboard input address=%s\\n' \\
+      "$local_window_address" >&2
+    if ! printf '%s' "$line" | "$WTYPE_BIN" -; then
+      printf 'yapyap: Moonlight keyboard text injection failed address=%s\\n' \\
+        "$local_window_address" >&2
+    fi
+    continue
+  fi
+
   if ! local_paste_shortcut="$(paste_shortcut_for_class "$local_window_class")"; then
-    local_paste_shortcut="CTRL,V,"
+    local_paste_shortcut="CTRL,V"
   fi
 
   sleep "$PASTE_DELAY"
-  printf 'yapyap: pasting transcript to class=%s via shortcut=%s\\n' \
-    "${local_window_class:-unknown}" \
-    "$local_paste_shortcut" >&2
+  printf 'yapyap: pasting transcript to class=%s address=%s via shortcut=%s\\n'     "${local_window_class:-unknown}"     "$local_window_address"     "$local_paste_shortcut" >&2
 
-  if ! "$HYPRCTL_BIN" dispatch sendshortcut "$local_paste_shortcut"; then
-    printf 'yapyap: hyprctl sendshortcut failed for class=%s via shortcut=%s\\n' \
-      "${local_window_class:-unknown}" \
-      "$local_paste_shortcut" >&2
+  if ! "$HYPRCTL_BIN" dispatch sendshortcut "$local_paste_shortcut,address:$local_window_address"; then
+    printf 'yapyap: hyprctl sendshortcut failed for class=%s address=%s via shortcut=%s\\n'       "${local_window_class:-unknown}"       "$local_window_address"       "$local_paste_shortcut" >&2
   fi
 done
 """
@@ -228,6 +333,7 @@ def render_runner() -> str:
         "__PYTHON_BIN__": shlex.quote(sys.executable),
         "__HYPRCTL_BIN__": shlex.quote(resolve_command("hyprctl", allow_missing=True)),
         "__WLCOPY_BIN__": shlex.quote(resolve_command("wl-copy", allow_missing=True)),
+        "__WTYPE_BIN__": shlex.quote(resolve_command("wtype", allow_missing=True)),
     }
     script = RUNNER_TEMPLATE
     for needle, replacement in replacements.items():
