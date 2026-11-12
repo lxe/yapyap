@@ -22,6 +22,9 @@ def make_typer():
     typer = hidtype.Typer.__new__(hidtype.Typer)
     typer.device = mock.Mock()
     typer.key_delay = 0
+    typer.burst_events = 32
+    typer._sent = 0
+    typer.burst_pause = 0
     typer.wtype = "/usr/bin/wtype"
     return typer
 

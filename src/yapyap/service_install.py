@@ -32,7 +32,8 @@ ENV_TEMPLATE = """# Optional overrides for the yapyap user service.
 # YAPYAP_DUCK_FADE_IN_MS=180
 # YAPYAP_AUTO_PASTE=1
 # YAPYAP_OUTPUT_MODE=type
-# YAPYAP_TYPE_KEY_DELAY_MS=2
+# YAPYAP_TYPE_BURST_EVENTS=16
+# YAPYAP_TYPE_BURST_PAUSE_MS=1
 # YAPYAP_PASTE_DELAY=0.05
 """
 
@@ -215,6 +216,21 @@ paste_shortcut_for_class() {
   esac
 }
 
+# Set local_window_class and local_window_address from one hyprctl call.
+read_active_window() {
+  local payload=""
+  local_window_class=""
+  local_window_address=""
+  [ -n "$HYPRCTL_BIN" ] || return 0
+  payload="$("$HYPRCTL_BIN" activewindow -j 2>/dev/null)" || return 0
+  if [[ "$payload" =~ \\"class\\":\\ \\"([^\\"]*)\\" ]]; then
+    local_window_class="${BASH_REMATCH[1],,}"
+  fi
+  if [[ "$payload" =~ \\"address\\":\\ \\"([^\\"]*)\\" ]]; then
+    local_window_address="${BASH_REMATCH[1]}"
+  fi
+}
+
 start_typer() {
   [ "$OUTPUT_MODE" = "type" ] || return 0
   coproc TYPER { exec "$PYTHON_BIN" -m yapyap.hidtype; }
@@ -259,23 +275,13 @@ while IFS= read -r -u "$YAPYAP_OUT" line; do
     continue
   fi
 
-  if ! local_window_class="$(active_window_class)"; then
-    local_window_class=""
-  fi
-  if ! local_window_address="$(active_window_address)"; then
-    local_window_address=""
-  fi
+  read_active_window
   if [ -z "$local_window_address" ]; then
     printf 'yapyap: no active window address, skipping paste\\n' >&2
     continue
   fi
 
   if [ "$OUTPUT_MODE" = "type" ]; then
-    sleep "$PASTE_DELAY"
-    if [ "$(active_window_address)" != "$local_window_address" ]; then
-      printf 'yapyap: focus changed before typing, skipping\\n' >&2
-      continue
-    fi
     printf 'yapyap: typing transcript to class=%s address=%s\\n' \\
       "${local_window_class:-unknown}" "$local_window_address" >&2
     if type_line "$line"; then

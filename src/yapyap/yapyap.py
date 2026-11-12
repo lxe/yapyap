@@ -97,12 +97,18 @@ class RuntimeState:
         if not WAYBAR_SIGNAL:
             return
 
-        subprocess.run(
-            ["pkill", f"-RTMIN+{WAYBAR_SIGNAL}", "waybar"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # pkill scans every process (~50-100 ms); run it in the background so
+        # stopping a recording does not wait for it before transcribing.
+        threading.Thread(
+            target=subprocess.run,
+            args=(["pkill", f"-RTMIN+{WAYBAR_SIGNAL}", "waybar"],),
+            kwargs={
+                "check": False,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            },
+            daemon=True,
+        ).start()
 
 
 def load_audio_file(path):

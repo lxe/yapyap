@@ -73,21 +73,41 @@ class Typer:
     def __init__(self) -> None:
         keys = sorted({code for code, _ in KEYMAP.values()} | {e.KEY_LEFTSHIFT})
         self.device = UInput({e.EV_KEY: keys}, name=DEVICE_NAME)
-        # Seconds between key events; 0.002 types ~250 characters a second.
-        self.key_delay = env_float("YAPYAP_TYPE_KEY_DELAY_MS", 2.0) / 1000.0
+        # Events go out in bursts with a short pause between them. The kernel
+        # buffers 64 events per reader (keyd, then the compositor), and big
+        # bursts lose keys: 64 events per burst dropped ~30% of characters and
+        # 32 occasionally dropped one, while 16 (4 plain characters) lost none
+        # in 8,400 characters. That still types ~3,400 characters a second.
+        self.burst_events = max(int(env_float("YAPYAP_TYPE_BURST_EVENTS", 16)), 4)
+        self.burst_pause = env_float("YAPYAP_TYPE_BURST_PAUSE_MS", 1.0) / 1000.0
+        self._sent = 0
+        # Optional extra delay after every key event, for apps that need it.
+        self.key_delay = env_float("YAPYAP_TYPE_KEY_DELAY_MS", 0.0) / 1000.0
+        # Physical keyboards stay open: closing an evdev node costs ~10 ms,
+        # and reopening all of them took ~300 ms per transcript.
+        self.watched: dict[str, evdev.InputDevice] = {}
+        self.ignored: set[str] = set()
+        self._refresh_watched()
         self.modifier_wait = env_float("YAPYAP_TYPE_MODIFIER_WAIT_S", 2.0)
         self.wtype = shutil.which("wtype")
         # Compositors take a moment to register a new keyboard.
         time.sleep(env_float("YAPYAP_TYPE_SETTLE_S", 0.3))
 
     def close(self) -> None:
+        for device in self.watched.values():
+            device.close()
         self.device.close()
 
     def _emit(self, code: int, value: int) -> None:
         self.device.write(e.EV_KEY, code, value)
         self.device.syn()
+        # Each key event plus its SYN_REPORT takes two buffer slots.
+        self._sent += 2
         if self.key_delay:
             time.sleep(self.key_delay)
+        elif self.burst_pause and self._sent >= self.burst_events:
+            time.sleep(self.burst_pause)
+            self._sent = 0
 
     def _tap(self, code: int, shifted: bool) -> None:
         if shifted:
@@ -97,36 +117,47 @@ class Typer:
         if shifted:
             self._emit(e.KEY_LEFTSHIFT, 0)
 
+    def _refresh_watched(self) -> None:
+        paths = set(evdev.list_devices())
+        for path in list(self.watched):
+            if path not in paths:
+                self.watched.pop(path).close()
+        # Event node numbers get reused, so forget ignored nodes that went away.
+        self.ignored &= paths
+        for path in paths - self.watched.keys() - self.ignored:
+            try:
+                device = evdev.InputDevice(path)
+            except OSError:
+                continue
+            keys = device.capabilities().get(e.EV_KEY, [])
+            if device.name == DEVICE_NAME or not MODIFIER_KEYS.intersection(keys):
+                device.close()
+                self.ignored.add(path)
+                continue
+            self.watched[path] = device
+
+    def _modifier_held(self) -> bool:
+        for path, device in list(self.watched.items()):
+            try:
+                if MODIFIER_KEYS.intersection(device.active_keys()):
+                    return True
+            except OSError:
+                self.watched.pop(path).close()
+        return False
+
     def wait_for_modifiers_released(self) -> None:
         """Wait until no physical keyboard holds a modifier.
 
         Typing while the dictation chord (Ctrl+Alt by default) is still held
         would turn every letter into a shortcut.
         """
+        self._refresh_watched()
         deadline = time.monotonic() + self.modifier_wait
-        while True:
-            held = False
-            for path in evdev.list_devices():
-                try:
-                    device = evdev.InputDevice(path)
-                except OSError:
-                    continue
-                try:
-                    if device.name == DEVICE_NAME:
-                        continue
-                    if MODIFIER_KEYS.intersection(device.active_keys()):
-                        held = True
-                        break
-                except OSError:
-                    pass
-                finally:
-                    device.close()
-            if not held:
-                return
+        while self._modifier_held():
             if time.monotonic() >= deadline:
                 log("modifier still held; typing anyway")
                 return
-            time.sleep(0.02)
+            time.sleep(0.005)
 
     def type_text(self, text: str) -> None:
         text = text.translate(ASCII_LOOKALIKES)
@@ -144,6 +175,9 @@ class Typer:
             self._type_unicode("".join(pending_unicode))
 
     def _type_unicode(self, text: str) -> None:
+        # wtype goes through a different device; let our queued keys drain first.
+        time.sleep(self.burst_pause)
+        self._sent = 0
         if not self.wtype:
             log(f"no wtype; dropped {text!r}")
             return
