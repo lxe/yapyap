@@ -7,6 +7,8 @@ import ctypes.util
 import importlib.util
 import io
 import json
+import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -14,6 +16,7 @@ import time
 import tempfile
 
 REMOTE_HOST = os.environ.get("YAPYAP_REMOTE_HOST", "").strip() or None
+INPUT_DEVICE = os.environ.get("YAPYAP_INPUT_DEVICE", "").strip() or None
 
 # pywhispercpp installs libwhisper.so + libggml*.so into site-packages but the linker can't find them
 if not REMOTE_HOST and not ctypes.util.find_library("whisper"):
@@ -43,6 +46,201 @@ WAYBAR_SIGNAL = os.environ.get("YAPYAP_WAYBAR_SIGNAL")
 SERVER_ONLY = os.environ.get("YAPYAP_SERVER_ONLY", "").lower() in {"1", "true", "yes", "on"}
 TCP_BIND = tcp_bind_address()
 REMOTE_UNREACHABLE_TEXT = "[remove server unreachable]"
+
+
+def _pactl_default_source_name():
+    try:
+        result = subprocess.run(
+            ["pactl", "get-default-source"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    return result.stdout.strip() or None
+
+
+def _pactl_source_description(source_name):
+    properties = _pactl_source_properties(source_name)
+    return properties.get("Description")
+
+
+def _pactl_source_properties(source_name):
+    if not source_name:
+        return {}
+
+    try:
+        result = subprocess.run(
+            ["pactl", "list", "sources"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return {}
+
+    in_source = False
+    in_properties = False
+    properties = {}
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Source #"):
+            in_source = False
+            in_properties = False
+            continue
+        if stripped == f"Name: {source_name}":
+            in_source = True
+            continue
+        if not in_source:
+            continue
+        if stripped.startswith("Description: "):
+            properties["Description"] = stripped.removeprefix("Description: ").strip()
+            continue
+        if stripped == "Properties:":
+            in_properties = True
+            continue
+        if in_properties and " = " in stripped:
+            key, value = stripped.split(" = ", 1)
+            properties[key] = value.strip('"')
+
+    return properties
+
+
+def _pactl_default_source_alsa_device():
+    properties = _pactl_source_properties(_pactl_default_source_name())
+    if properties.get("api.alsa.pcm.stream") != "capture":
+        return None
+
+    card = properties.get("api.alsa.pcm.card") or properties.get("alsa.card")
+    device = properties.get("alsa.device")
+    if card is None or device is None:
+        return None
+
+    return f"hw:{card},{device}"
+
+
+def _query_input_device(device):
+    try:
+        sd.query_devices(device, kind="input")
+    except (ValueError, sd.PortAudioError):
+        return None
+    return device
+
+
+def _default_source_sounddevice_device():
+    properties = _pactl_source_properties(_pactl_default_source_name())
+    if properties.get("api.alsa.pcm.stream") != "capture":
+        return None
+
+    card = properties.get("api.alsa.pcm.card") or properties.get("alsa.card")
+    device = properties.get("alsa.device")
+    candidates = []
+
+    if card is not None:
+        # Some UCM profiles expose a default Line/Mic source whose direct hw
+        # node is unavailable or silent after reboot, while the card's base
+        # capture node is the actual working microphone.
+        candidates.extend(f"hw:{card},{idx}" for idx in range(4))
+    if card is not None and device is not None:
+        candidates.append(f"hw:{card},{device}")
+
+    source_description = properties.get("Description")
+    if source_description:
+        candidates.append(source_description)
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if _query_input_device(candidate):
+            return candidate
+
+    return None
+
+
+def _sounddevice_input_devices():
+    return [
+        device
+        for device in sd.query_devices()
+        if int(device.get("max_input_channels", 0)) > 0
+    ]
+
+
+def _sounddevice_input_names():
+    return [device["name"] for device in _sounddevice_input_devices()]
+
+
+def _pactl_default_source_sounddevice_name():
+    source_name = _pactl_default_source_name()
+    source_description = _pactl_source_description(source_name)
+    input_names = _sounddevice_input_names()
+    if source_description and source_description in input_names:
+        return source_description
+
+    if source_name:
+        source_tail = source_name.rsplit(".", 1)[-1].replace("_", " ").lower()
+        for name in input_names:
+            if source_tail and source_tail in name.lower():
+                return name
+
+    alsa_device = _pactl_default_source_alsa_device()
+    if alsa_device:
+        alsa_suffix = f"({alsa_device})"
+        for name in input_names:
+            if alsa_suffix in name:
+                return name
+
+    return None
+
+
+def _pipewire_source_id(source_name):
+    if not source_name:
+        return None
+
+    try:
+        result = subprocess.run(
+            ["pw-dump"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        payload = json.loads(result.stdout)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
+        return None
+
+    for item in payload:
+        if item.get("type") != "PipeWire:Interface:Node":
+            continue
+        props = item.get("info", {}).get("props", {})
+        if props.get("media.class") != "Audio/Source":
+            continue
+        if props.get("node.name") == source_name:
+            serial = props.get("object.serial")
+            if serial is not None:
+                return str(serial)
+            return source_name
+
+    return None
+
+
+def resolve_input_device(configured_device):
+    if is_default_input_device(configured_device):
+        return _default_source_sounddevice_device() or None
+
+    if configured_device.lower() == "alsa-default-source":
+        return _pactl_default_source_alsa_device() or None
+
+    return configured_device
+
+
+def is_default_input_device(configured_device):
+    return not configured_device or configured_device.lower() in {"default", "pulse-default"}
 
 
 def default_state_path():
@@ -289,8 +487,12 @@ class VoiceRecorder:
         self.recording = False
         self.audio_data = None
         self.stream = None
+        self.capture_process = None
+        self.capture_thread = None
+        self.audio_backend = "pulse"
         self.model_lock = threading.Lock()
         self.samplerate = None
+        self.input_device = None
         self.remote_host = REMOTE_HOST
         self.model = None
         
@@ -304,11 +506,56 @@ class VoiceRecorder:
             self.model = Model(MODEL_NAME, language="auto")
 
         if self.enable_input:
-            # Can't default this to 16000, because some audio libs can't handle it
-            self.samplerate = int(sd.query_devices(kind="input")["default_samplerate"])
-            print(f"Samplerate: {self.samplerate}", file=sys.stderr)
-            sd.default.samplerate = self.samplerate
-            sd.default.channels = 1
+            try:
+                self.refresh_input_device(force_log=True)
+            except (ValueError, sd.PortAudioError) as e:
+                print(f"Input device unavailable at startup: {e}", file=sys.stderr)
+
+    def refresh_input_device(self, force_log=False):
+        # Re-resolve "default" on each recording so reconnects/card renumbering
+        # do not leave the service pinned to a stale hw:N,M device.
+        if is_default_input_device(INPUT_DEVICE) and shutil.which("pw-record"):
+            self.audio_backend = "pipewire"
+            source_name = _pactl_default_source_name()
+            next_input_device = _pipewire_source_id(source_name) or source_name
+            next_samplerate = WHISPER_SAMPLERATE
+            device_name = _pactl_source_description(source_name) or source_name or "PipeWire default source"
+
+            if force_log or next_input_device != self.input_device or next_samplerate != self.samplerate:
+                print(f"Samplerate: {next_samplerate}", file=sys.stderr)
+                print(f"Input device: {device_name}", file=sys.stderr)
+
+            self.input_device = next_input_device
+            self.samplerate = next_samplerate
+            return {
+                "name": device_name,
+                "default_samplerate": next_samplerate,
+                "max_input_channels": 1,
+            }
+
+        self.audio_backend = "sounddevice"
+        next_input_device = resolve_input_device(INPUT_DEVICE)
+        try:
+            device_info = sd.query_devices(next_input_device, kind="input")
+        except (ValueError, sd.PortAudioError) as e:
+            if next_input_device is None:
+                raise
+
+            print(
+                f"Input device {next_input_device!r} unavailable ({e}); falling back to sounddevice default",
+                file=sys.stderr,
+            )
+            next_input_device = None
+            device_info = sd.query_devices(kind="input")
+        next_samplerate = int(device_info["default_samplerate"])
+
+        if force_log or next_input_device != self.input_device or next_samplerate != self.samplerate:
+            print(f"Samplerate: {next_samplerate}", file=sys.stderr)
+            print(f"Input device: {device_info['name']}", file=sys.stderr)
+
+        self.input_device = next_input_device
+        self.samplerate = next_samplerate
+        return device_info
 
     def audio_callback(self, indata, frames, time, status):
         if status:
@@ -326,16 +573,26 @@ class VoiceRecorder:
 
         try:
             # Debug audio device info
-            device_info = sd.query_devices(kind="input")
+            device_info = self.refresh_input_device()
             print(f"🎤 Recording... Device: {device_info['name']}", file=sys.stderr)
             print(f"🎤 Device samplerate: {device_info['default_samplerate']}, channels: {device_info['max_input_channels']}", file=sys.stderr)
 
-            self.stream = sd.InputStream(callback=self.audio_callback)
-            print(f"🎤 Stream created: {self.stream}", file=sys.stderr)
-            self.stream.start()
             self.recording = True
             self.runtime_state.update(active=True, recording=True)
-            print(f"🎤 Stream started, active={self.stream.active}", file=sys.stderr)
+            if self.audio_backend == "pipewire":
+                self.start_pipewire_capture()
+            elif self.audio_backend == "pulse":
+                self.start_pulse_capture()
+            else:
+                self.stream = sd.InputStream(
+                    device=self.input_device,
+                    channels=1,
+                    samplerate=self.samplerate,
+                    callback=self.audio_callback,
+                )
+                print(f"🎤 Stream created: {self.stream}", file=sys.stderr)
+                self.stream.start()
+                print(f"🎤 Stream started, active={self.stream.active}", file=sys.stderr)
         except Exception:
             self.recording = False
             self.audio_data = []
@@ -343,7 +600,64 @@ class VoiceRecorder:
             if self.stream:
                 self.stream.close()
                 self.stream = None
+            if self.capture_process:
+                self.capture_process.terminate()
+                self.capture_process = None
             raise
+
+    def read_pulse_capture(self):
+        if not self.capture_process or not self.capture_process.stdout:
+            return
+
+        fd = self.capture_process.stdout.fileno()
+        while self.capture_process:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            self.audio_data.append(np.frombuffer(chunk, dtype=np.float32).copy())
+            if len(self.audio_data) % 50 == 1:
+                print(f"📊 Captured {len(self.audio_data)} chunks", file=sys.stderr)
+
+    def start_pipewire_capture(self):
+        command = [
+            "pw-record",
+            "--raw",
+            "--format=f32",
+            f"--rate={WHISPER_SAMPLERATE}",
+            "--channels=1",
+            "--latency=20ms",
+        ]
+        if self.input_device:
+            command.extend(["--target", self.input_device])
+        command.append("-")
+
+        self.capture_process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self.capture_thread = threading.Thread(target=self.read_pulse_capture, daemon=True)
+        self.capture_thread.start()
+        print("🎤 PipeWire capture started", file=sys.stderr)
+
+    def start_pulse_capture(self):
+        command = [
+            "parec",
+            "--raw",
+            "--format=float32le",
+            f"--rate={WHISPER_SAMPLERATE}",
+            "--channels=1",
+            "--latency-msec=20",
+            "--process-time-msec=10",
+        ]
+        self.capture_process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self.capture_thread = threading.Thread(target=self.read_pulse_capture, daemon=True)
+        self.capture_thread.start()
+        print("🎤 Pulse/PipeWire capture started", file=sys.stderr)
 
     def stop_recording(self):
         print(f"🛑 stop_recording called, self.recording={self.recording}", file=sys.stderr)
@@ -352,6 +666,20 @@ class VoiceRecorder:
 
         self.recording = False
         self.runtime_state.update(active=True, recording=False)
+
+        if self.capture_process:
+            print("🛑 Stopping PipeWire/Pulse capture...", file=sys.stderr)
+            self.capture_process.terminate()
+            try:
+                self.capture_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.capture_process.kill()
+                self.capture_process.wait(timeout=2)
+            if self.capture_thread:
+                self.capture_thread.join(timeout=2)
+            self.capture_process = None
+            self.capture_thread = None
+            print("🛑 PipeWire/Pulse capture stopped", file=sys.stderr)
 
         if self.stream:
             print("🛑 Aborting stream...", file=sys.stderr)
@@ -408,7 +736,11 @@ class VoiceRecorder:
             print(f"🔑 Key: {key_name}, pressed={pressed}, active={self.pressed_keys}", file=sys.stderr)
 
             if CHORD.issubset(self.pressed_keys):
-                self.start_recording()
+                try:
+                    self.start_recording()
+                except (ValueError, sd.PortAudioError) as e:
+                    print(f"❌ Could not start recording: {e}", file=sys.stderr)
+                    self.runtime_state.update(active=True, recording=False)
             else:
                 self.stop_recording()
 
@@ -518,6 +850,7 @@ class VoiceRecorder:
         }
         return text, timings
 def main():
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
     runtime_state = RuntimeState(STATE_PATH)
     recorder = VoiceRecorder(runtime_state, enable_input=not SERVER_ONLY)
     server = TranscriptionServer(recorder, SOCKET_PATH, TCP_BIND)
