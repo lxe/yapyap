@@ -31,6 +31,8 @@ ENV_TEMPLATE = """# Optional overrides for the yapyap user service.
 # YAPYAP_DUCK_FADE_OUT_MS=120
 # YAPYAP_DUCK_FADE_IN_MS=180
 # YAPYAP_AUTO_PASTE=1
+# YAPYAP_OUTPUT_MODE=type
+# YAPYAP_TYPE_KEY_DELAY_MS=2
 # YAPYAP_PASTE_DELAY=0.05
 """
 
@@ -60,6 +62,8 @@ STATE_FILE="${YAPYAP_STATE:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/yapyap-state-
 WAYBAR_SIGNAL="${YAPYAP_WAYBAR_SIGNAL:-11}"
 AUTO_PASTE="${YAPYAP_AUTO_PASTE:-1}"
 PASTE_DELAY="${YAPYAP_PASTE_DELAY:-0.05}"
+# type: key presses through a virtual uinput keyboard; paste: clipboard + Ctrl+V.
+OUTPUT_MODE="${YAPYAP_OUTPUT_MODE:-type}"
 
 YAPYAP_BIN=__YAPYAP_BIN__
 PYTHON_BIN=__PYTHON_BIN__
@@ -211,7 +215,28 @@ paste_shortcut_for_class() {
   esac
 }
 
-"$YAPYAP_BIN" | while IFS= read -r line; do
+start_typer() {
+  [ "$OUTPUT_MODE" = "type" ] || return 0
+  coproc TYPER { exec "$PYTHON_BIN" -m yapyap.hidtype; }
+}
+
+# Type one transcript through the virtual keyboard; non-zero means fall back to paste.
+type_line() {
+  local ack=""
+  [ "$OUTPUT_MODE" = "type" ] || return 1
+  [ -n "${TYPER_PID:-}" ] && kill -0 "$TYPER_PID" 2>/dev/null || return 1
+  printf '%s\\n' "$1" >&"${TYPER[1]}" || return 1
+  IFS= read -r -t 30 ack <&"${TYPER[0]}" || return 1
+  [ "$ack" = "done" ]
+}
+
+start_typer
+
+# Read transcripts in this shell (not a pipeline subshell) so the typer coprocess stays reachable.
+exec {YAPYAP_OUT}< <("$YAPYAP_BIN")
+YAPYAP_PID=$!
+
+while IFS= read -r -u "$YAPYAP_OUT" line; do
   local_window_class=""
   local_window_address=""
   local_paste_shortcut=""
@@ -245,6 +270,20 @@ paste_shortcut_for_class() {
     continue
   fi
 
+  if [ "$OUTPUT_MODE" = "type" ]; then
+    sleep "$PASTE_DELAY"
+    if [ "$(active_window_address)" != "$local_window_address" ]; then
+      printf 'yapyap: focus changed before typing, skipping\\n' >&2
+      continue
+    fi
+    printf 'yapyap: typing transcript to class=%s address=%s\\n' \\
+      "${local_window_class:-unknown}" "$local_window_address" >&2
+    if type_line "$line"; then
+      continue
+    fi
+    printf 'yapyap: virtual keyboard typing failed, pasting instead\\n' >&2
+  fi
+
   if [ "$local_window_class" = "com.moonlight_stream.moonlight" ]; then
     if [ -z "$WTYPE_BIN" ] || [ ! -x "$WTYPE_BIN" ]; then
       printf 'yapyap: wtype is unavailable, cannot type into Moonlight\\n' >&2
@@ -275,6 +314,9 @@ paste_shortcut_for_class() {
     printf 'yapyap: hyprctl sendshortcut failed for class=%s address=%s via shortcut=%s\\n'       "${local_window_class:-unknown}"       "$local_window_address"       "$local_paste_shortcut" >&2
   fi
 done
+
+# Exit with yapyap's status so systemd restarts it on failure.
+wait "$YAPYAP_PID"
 """
 
 
