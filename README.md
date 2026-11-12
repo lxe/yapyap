@@ -95,9 +95,18 @@ YAPYAP_TCP_HOST=0.0.0.0
 YAPYAP_TCP_PORT=8122
 YAPYAP_REMOTE_HOST=192.168.0.102:8122
 YAPYAP_INPUT_DEVICE=pulse-default
+YAPYAP_DUCK_AUDIO=1
+YAPYAP_DUCK_VOLUME=0.50
+YAPYAP_DUCK_FADE_OUT_MS=120
+YAPYAP_DUCK_FADE_IN_MS=180
 YAPYAP_AUTO_PASTE=1
 YAPYAP_PASTE_DELAY=0.05
 ```
+
+With audio ducking enabled, active application playback fades to the configured
+fraction of its current per-app volume while the recording chord is held, then
+fades back to the exact prior volume when the chord is released. Muted and
+paused streams are not changed.
 
 If `YAPYAP_REMOTE_HOST` is set on a listening client, local microphone capture stays local but transcription is forwarded to that remote server. In that mode `yapyap` does not load a local Whisper model; if the remote server cannot be reached, the listening pipeline emits `[remove server unreachable]`.
 

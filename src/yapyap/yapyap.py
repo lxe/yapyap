@@ -31,6 +31,7 @@ import numpy as np
 import scipy.signal
 import sounddevice as sd
 from evdev import ecodes
+from .audio_ducking import PulseAudioDucker
 from .ipc import SOCKET_PATH, request_transcription, tcp_bind_address
 from .keyboard import monitor_keyboard_events
 
@@ -46,6 +47,27 @@ WAYBAR_SIGNAL = os.environ.get("YAPYAP_WAYBAR_SIGNAL")
 SERVER_ONLY = os.environ.get("YAPYAP_SERVER_ONLY", "").lower() in {"1", "true", "yes", "on"}
 TCP_BIND = tcp_bind_address()
 REMOTE_UNREACHABLE_TEXT = "[remove server unreachable]"
+
+
+def env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_float(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def _pactl_default_source_name():
@@ -490,6 +512,19 @@ class VoiceRecorder:
         self.capture_process = None
         self.capture_thread = None
         self.audio_backend = "pulse"
+        self.audio_ducker = PulseAudioDucker(
+            enabled=env_flag("YAPYAP_DUCK_AUDIO"),
+            volume_ratio=env_float("YAPYAP_DUCK_VOLUME", 0.50),
+            fade_out_ms=env_int("YAPYAP_DUCK_FADE_OUT_MS", 120),
+            fade_in_ms=env_int("YAPYAP_DUCK_FADE_IN_MS", 180),
+        )
+        if self.audio_ducker.enabled:
+            print(
+                f"Audio ducking: {self.audio_ducker.volume_ratio:.0%} over "
+                f"{self.audio_ducker.fade_out_ms}ms down / "
+                f"{self.audio_ducker.fade_in_ms}ms up",
+                file=sys.stderr,
+            )
         self.model_lock = threading.Lock()
         self.samplerate = None
         self.input_device = None
@@ -660,6 +695,7 @@ class VoiceRecorder:
         print("🎤 Pulse/PipeWire capture started", file=sys.stderr)
 
     def stop_recording(self):
+        self.audio_ducker.restore()
         print(f"🛑 stop_recording called, self.recording={self.recording}", file=sys.stderr)
         if not self.recording:
             return
@@ -736,9 +772,11 @@ class VoiceRecorder:
             print(f"🔑 Key: {key_name}, pressed={pressed}, active={self.pressed_keys}", file=sys.stderr)
 
             if CHORD.issubset(self.pressed_keys):
+                self.audio_ducker.duck()
                 try:
                     self.start_recording()
                 except (ValueError, sd.PortAudioError) as e:
+                    self.audio_ducker.restore()
                     print(f"❌ Could not start recording: {e}", file=sys.stderr)
                     self.runtime_state.update(active=True, recording=False)
             else:
@@ -877,6 +915,7 @@ def main():
         print("Try running with sudo or add your user to the input group", file=sys.stderr)
         sys.exit(1)
     finally:
+        recorder.audio_ducker.restore(wait=True)
         runtime_state.update(active=False, recording=False)
         server.stop()
 
