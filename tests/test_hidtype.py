@@ -46,10 +46,11 @@ def test_lines_with_non_us_characters_go_to_wtype_whole():
     with mock.patch.object(hidtype.subprocess, "run", side_effect=lambda argv, check: runs.append(argv)):
         typer.type_text(" хочу говорить \u2014 по-русски")
         typer.type_text("caf\u00e9 ok")
-    # One call per line, with the settle pause, and the original dash kept.
+    # One call per line: a Shift tap the app may drop, the settle pause, and
+    # the original dash kept.
     assert runs == [
-        ["/usr/bin/wtype", "-s", "15", "--", " хочу говорить \u2014 по-русски"],
-        ["/usr/bin/wtype", "-s", "15", "--", "caf\u00e9 ok"],
+        ["/usr/bin/wtype", "-k", "Shift_L", "-s", "15", "--", " хочу говорить \u2014 по-русски"],
+        ["/usr/bin/wtype", "-k", "Shift_L", "-s", "15", "--", "caf\u00e9 ok"],
     ]
     typer.device.write.assert_not_called()
 
@@ -61,3 +62,16 @@ def test_english_with_curly_quotes_stays_on_the_keyboard():
     run.assert_not_called()
     events = [(c.args[1], c.args[2]) for c in typer.device.write.call_args_list]
     assert decode(events) == 'It\'s "fine"'
+
+
+
+def test_queued_lines_are_typed_as_one_batch():
+    import queue
+
+    lines = queue.Queue()
+    lines.put(" Вот")
+    assert hidtype.next_batch(lines) == [" Вот"]
+    for piece in (" сейчас", " я", None):
+        lines.put(piece)
+    assert hidtype.next_batch(lines) == [" сейчас", " я"]
+    assert hidtype.next_batch(lines) is None

@@ -14,9 +14,11 @@ protocol.
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 import evdev
@@ -98,10 +100,12 @@ class Typer:
         self._refresh_watched()
         self.modifier_wait = env_float("YAPYAP_TYPE_MODIFIER_WAIT_S", 2.0)
         self.wtype = shutil.which("wtype")
-        # wtype uploads a new keymap on every call, and apps drop the first
-        # keys typed before they have loaded it: "Если хочу" came out as
-        # "сли очу". A pause after the upload fixed it in testing from 3 ms.
-        self.wtype_settle_ms = max(int(env_float("YAPYAP_WTYPE_SETTLE_MS", 15)), 0)
+        # wtype brings its own keymap, and under Hyprland the app only
+        # switches to it when wtype's first key arrives, so that first key
+        # is lost: "Если хочу" came out as "сли очу", and every streamed
+        # piece lost its leading space. Each call therefore starts with a
+        # Shift tap the app may drop, then waits before the real text.
+        self.wtype_settle_ms = max(int(env_float("YAPYAP_WTYPE_SETTLE_MS", 30)), 0)
         # Compositors take a moment to register a new keyboard.
         time.sleep(env_float("YAPYAP_TYPE_SETTLE_S", 0.3))
 
@@ -198,11 +202,50 @@ class Typer:
             log(f"no wtype; dropped {text!r}")
             return
         start = time.perf_counter()
-        subprocess.run([self.wtype, "-s", str(self.wtype_settle_ms), "--", text], check=False)
+        subprocess.run(
+            [self.wtype, "-k", "Shift_L", "-s", str(self.wtype_settle_ms), "--", text],
+            check=False,
+        )
         self.unicode_runs += 1
         self.unicode_time += time.perf_counter() - start
         # Do not count the wtype call as a gap between our own key events.
         self._last_emit = None
+
+
+def read_lines(fd: int, lines: queue.Queue) -> None:
+    """Read stdin lines, acknowledge each one at once, and queue it.
+
+    Acknowledging on receipt lets the caller send the next streamed piece
+    while earlier ones are still being typed. None marks end of input.
+    """
+    pending = b""
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            lines.put(None)
+            return
+        pending += chunk
+        *complete, pending = pending.split(b"\n")
+        for raw in complete:
+            lines.put(raw.decode("utf-8", "replace"))
+            print("done", flush=True)
+
+
+def next_batch(lines: queue.Queue) -> list[str] | None:
+    """Block for one line, then take every line already queued behind it."""
+    first = lines.get()
+    if first is None:
+        return None
+    batch = [first]
+    while True:
+        try:
+            line = lines.get_nowait()
+        except queue.Empty:
+            return batch
+        if line is None:
+            lines.put(None)
+            return batch
+        batch.append(line)
 
 
 def main() -> None:
@@ -212,9 +255,14 @@ def main() -> None:
         log(f"cannot create virtual keyboard: {exc}")
         sys.exit(1)
     log(f"ready ({DEVICE_NAME})")
+    lines: queue.Queue = queue.Queue()
+    threading.Thread(target=read_lines, args=(0, lines), daemon=True).start()
     try:
-        for line in sys.stdin:
-            text = line.rstrip("\n")
+        while (batch := next_batch(lines)) is not None:
+            # Pieces that queued up while the last batch was typed go out
+            # together: one wtype call for several Russian words instead of
+            # one per word.
+            text = "".join(batch)
             if not text:
                 continue
             start = time.perf_counter()
@@ -226,18 +274,16 @@ def main() -> None:
             # transcripts and anything unusual, not every piece.
             if len(text) >= 40 or typer.max_gap > 0.02 or typer.unicode_runs:
                 log(
-                    f"typed {len(text)} chars in {1000 * (done_at - typed_at):.0f} ms"
+                    f"typed {len(text)} chars from {len(batch)} line(s) in"
+                    f" {1000 * (done_at - typed_at):.0f} ms"
                     f" (modifier wait {1000 * (typed_at - start):.0f} ms,"
                     f" longest gap {1000 * typer.max_gap:.1f} ms,"
                     f" wtype {typer.unicode_runs}x {1000 * typer.unicode_time:.0f} ms)"
                 )
-            # Tell a waiting caller this line is done.
-            print("done", flush=True)
     except KeyboardInterrupt:
         pass
     finally:
         typer.close()
-
 
 if __name__ == "__main__":
     main()
