@@ -6,6 +6,20 @@ https://github.com/user-attachments/assets/208f949a-3d26-46b5-9b64-52b273e1b00b
 
 Whisper runs on a server, which can be your own machine or another one on your network with a GPU. The server speaks the OpenAI transcription API, so other apps can use it too.
 
+## Features
+
+**Fast.** On an Intel Core Ultra (Lunar Lake) machine with integrated Arc 140V graphics, the first words get typed about 250 ms after you let go of the keys. The server streams text while Whisper decodes it, so a 20-second sentence is fully typed about half a second after you stop talking.
+
+| Speech length | First words typed | Full transcript |
+|---|---|---|
+| 6 s | 250 ms | 0.33 s |
+| 12 s | 255 ms | 0.42 s |
+| 20 s | 270 ms | 0.52 s |
+
+**Multilingual.** The default model is [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo), which covers 99 languages and detects the language of each recording. I've used it every day for over a year. I've tested newer models, including Qwen3-ASR and Parakeet, and none of them matched it on both speed and accuracy on this hardware.
+
+**Real key presses.** Yap Yap types through a virtual keyboard, the same way a USB keyboard would. No paste shortcuts are involved, and the text lands in any window that accepts typing, including terminals, remote desktops and games.
+
 ## Install
 
 1. **Start the server** on the machine that will transcribe. Pick the line for its hardware:
@@ -43,7 +57,7 @@ Whisper runs on a server, which can be your own machine or another one on your n
 
 ## Use it
 
-Hold the keys, talk, release. Text goes out as real key presses, so it works in terminals, browsers, remote desktops and games. For accented letters and other scripts, install [wtype](https://github.com/atx/wtype). On [Hyprland](https://hyprland.org), you can add Russian as a second keyboard layout (`kb_layout = us,ru`), and Russian will type as fast as English.
+Hold the keys, talk, and let go. For accented letters and other scripts, install [wtype](https://github.com/atx/wtype). On [Hyprland](https://hyprland.org), you can add Russian as a second keyboard layout (`kb_layout = us,ru`), and Russian will type as fast as English.
 
 `yapyap transcribe file.ogg` transcribes an audio file.
 
