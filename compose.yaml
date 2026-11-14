@@ -1,13 +1,5 @@
-# Yap Yap transcription server. Pick the service that matches the machine:
-#
-#   docker compose --profile intel up -d    # Intel GPU (OpenVINO)
-#   docker compose --profile cpu up -d      # any CPU (whisper.cpp)
-#   docker compose --profile nvidia up -d   # NVIDIA GPU (whisper.cpp + CUDA)
-#
-# Settings go in a .env file next to this one:
-#   YAPYAP_TOKEN=<a long random string, e.g. from: openssl rand -hex 24>
-#   RENDER_GID=<Intel only: the output of: stat -c %g /dev/dri/renderD128>
-# Clients put the same token in ~/.config/yapyap/config.toml.
+# Yap Yap server. Start one profile: intel, nvidia or cpu (see README.md).
+# .env holds YAPYAP_TOKEN, and RENDER_GID for the Intel profile.
 
 x-server: &server
   restart: unless-stopped
