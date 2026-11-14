@@ -744,7 +744,13 @@ class VoiceRecorder:
 
             print("🎯 Transcribing...", file=sys.stderr)
             try:
+                transcribe_start = time.perf_counter()
                 text, _ = self.transcribe_audio(audio)
+                print(
+                    f"🎯 Transcribed {len(audio) / WHISPER_SAMPLERATE:.1f} s of audio in "
+                    f"{1000 * (time.perf_counter() - transcribe_start):.0f} ms",
+                    file=sys.stderr,
+                )
 
                 if text:
                     print(text, flush=True)

@@ -81,6 +81,10 @@ class Typer:
         self.burst_events = max(int(env_float("YAPYAP_TYPE_BURST_EVENTS", 16)), 4)
         self.burst_pause = env_float("YAPYAP_TYPE_BURST_PAUSE_MS", 1.0) / 1000.0
         self._sent = 0
+        self._last_emit: float | None = None
+        self.max_gap = 0.0
+        self.unicode_runs = 0
+        self.unicode_time = 0.0
         # Optional extra delay after every key event, for apps that need it.
         self.key_delay = env_float("YAPYAP_TYPE_KEY_DELAY_MS", 0.0) / 1000.0
         # Physical keyboards stay open: closing an evdev node costs ~10 ms,
@@ -99,6 +103,10 @@ class Typer:
         self.device.close()
 
     def _emit(self, code: int, value: int) -> None:
+        now = time.perf_counter()
+        if self._last_emit is not None:
+            self.max_gap = max(self.max_gap, now - self._last_emit)
+        self._last_emit = now
         self.device.write(e.EV_KEY, code, value)
         self.device.syn()
         # Each key event plus its SYN_REPORT takes two buffer slots.
@@ -160,6 +168,10 @@ class Typer:
             time.sleep(0.005)
 
     def type_text(self, text: str) -> None:
+        self._last_emit = None
+        self.max_gap = 0.0
+        self.unicode_runs = 0
+        self.unicode_time = 0.0
         text = text.translate(ASCII_LOOKALIKES)
         pending_unicode: list[str] = []
         for ch in text:
@@ -181,7 +193,12 @@ class Typer:
         if not self.wtype:
             log(f"no wtype; dropped {text!r}")
             return
+        start = time.perf_counter()
         subprocess.run([self.wtype, "--", text], check=False)
+        self.unicode_runs += 1
+        self.unicode_time += time.perf_counter() - start
+        # Do not count the wtype call as a gap between our own key events.
+        self._last_emit = None
 
 
 def main() -> None:
@@ -196,8 +213,17 @@ def main() -> None:
             text = line.rstrip("\n")
             if not text:
                 continue
+            start = time.perf_counter()
             typer.wait_for_modifiers_released()
+            typed_at = time.perf_counter()
             typer.type_text(text)
+            done_at = time.perf_counter()
+            log(
+                f"typed {len(text)} chars in {1000 * (done_at - typed_at):.0f} ms"
+                f" (modifier wait {1000 * (typed_at - start):.0f} ms,"
+                f" longest gap {1000 * typer.max_gap:.1f} ms,"
+                f" wtype {typer.unicode_runs}x {1000 * typer.unicode_time:.0f} ms)"
+            )
             # Tell a waiting caller this line is done.
             print("done", flush=True)
     except KeyboardInterrupt:

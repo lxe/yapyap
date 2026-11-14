@@ -24,6 +24,7 @@ def make_typer():
     typer.key_delay = 0
     typer.burst_events = 32
     typer._sent = 0
+    typer._last_emit = None
     typer.burst_pause = 0
     typer.wtype = "/usr/bin/wtype"
     return typer
