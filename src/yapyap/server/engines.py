@@ -84,10 +84,11 @@ class WhisperCppEngine:
         self._lock = threading.Lock()
 
     def transcribe(self, audio, *, language=None, prompt=None, on_delta=None):
-        def on_segment(segments):
+        def on_segment(segment):
+            # pywhispercpp passes one segment (or, in older versions, a list).
             if on_delta:
-                for segment in segments:
-                    on_delta(segment.text)
+                for item in segment if isinstance(segment, list) else [segment]:
+                    on_delta(item.text)
 
         params = {"language": language or "auto"}
         if prompt:

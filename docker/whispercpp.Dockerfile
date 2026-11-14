@@ -20,11 +20,16 @@ RUN python3 -m venv /opt/yapyap \
        fi \
     && rm -rf /src
 
+# A source build of pywhispercpp puts libwhisper and libggml next to the module.
+# CUDA_CACHE_PATH keeps kernels compiled for the GPU on first start (about 15 s)
+# in the models volume, so later starts skip that step.
 ENV PATH=/opt/yapyap/bin:$PATH \
+    LD_LIBRARY_PATH=/opt/yapyap/lib/python3.12/site-packages \
     YAPYAP_ENGINE=whispercpp \
     YAPYAP_HOST=0.0.0.0 \
     YAPYAP_PORT=8122 \
-    XDG_DATA_HOME=/models
+    XDG_DATA_HOME=/models \
+    CUDA_CACHE_PATH=/models/cuda-cache
 VOLUME /models
 EXPOSE 8122
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10m CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8122/health', timeout=3)"
