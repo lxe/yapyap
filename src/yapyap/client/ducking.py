@@ -1,14 +1,16 @@
-#!/usr/bin/env python3
+"""Lower other apps' audio while recording (PulseAudio/PipeWire via pactl)."""
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
+
+log = logging.getLogger("yapyap")
 
 
 @dataclass(frozen=True)
@@ -182,17 +184,10 @@ class PulseAudioDucker:
                     for stream in current_streams
                     if stream.index in target_streams
                 )
-                print(
-                    f"🔉 Ducked {changed_streams} playback stream(s) to "
-                    f"{self.volume_ratio:.0%}: {names}",
-                    file=sys.stderr,
-                )
+                log.info("lowered %d playback stream(s) to %.0f%%: %s", changed_streams, 100 * self.volume_ratio, names)
             else:
                 self._finish_restore(generation)
-                print(
-                    f"🔊 Restored {changed_streams} playback stream(s)",
-                    file=sys.stderr,
-                )
+                log.info("restored %d playback stream(s)", changed_streams)
         finally:
             if persistence_paused:
                 self._resume_stream_persistence()
@@ -266,10 +261,7 @@ class PulseAudioDucker:
                 subprocess.CalledProcessError,
                 subprocess.TimeoutExpired,
             ):
-                print(
-                    "⚠️ Could not re-enable saved application volumes",
-                    file=sys.stderr,
-                )
+                log.warning("could not re-enable saved application volumes")
 
     def _finish_restore(self, generation: int) -> None:
         with self._lock:

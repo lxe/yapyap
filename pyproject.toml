@@ -1,29 +1,44 @@
 [project]
 name = "yapyap"
-version = "0.1.0"
-description = "Fast and simple push-to-talk dictation"
+version = "0.2.0"
+description = "Push-to-talk dictation for Linux with a self-hosted Whisper server"
 readme = "README.md"
 authors = [
     { name = "Aleksey Smolenchuk", email = "lxe@lxe.co" }
 ]
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
-    "numpy>=2.3.2",
-    "sounddevice>=0.5.2",
-    "soundfile>=0.13.1",
-    "scipy>=1.16.1",
-    "pywhispercpp",
-    "evdev>=1.9.2",
+    "evdev>=2.0.0",
+]
+
+[project.optional-dependencies]
+server = [
+    "numpy>=2.5.4",
+    "starlette>=1.10.0",
+    "uvicorn>=0.54.0",
+    "python-multipart>=0.0.33",
+]
+openvino = [
+    "yapyap[server]",
+    "openvino-genai>=2026.4.1.0",
+    "huggingface-hub>=2.4.0",
+]
+whispercpp = [
+    "yapyap[server]",
+    "pywhispercpp>=1.5.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "httpx2>=2.16.0",
 ]
 
 [project.scripts]
-yapyap = "yapyap.yapyap:main"
-yapyap-cli = "yapyap.cli_client:main"
-yapyap-install-service = "yapyap.service_install:main"
+yapyap = "yapyap.cli:main"
+yapyap-server = "yapyap.server.app:main"
 
 [build-system]
-requires = ["uv_build>=0.8.4,<0.9.0"]
+requires = ["uv_build>=0.13.8,<0.14"]
 build-backend = "uv_build"
-
-[tool.uv.sources.pywhispercpp]
-git = "https://github.com/lxe/pywhispercpp"

@@ -3,7 +3,7 @@ import subprocess
 import unittest
 from types import SimpleNamespace
 
-from yapyap.audio_ducking import PulseAudioDucker, _playback_streams
+from yapyap.client.ducking import PulseAudioDucker, _playback_streams
 
 
 def sink_input(index, volumes, *, corked=False, mute=False, name="Music"):
