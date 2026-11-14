@@ -49,6 +49,32 @@ def cmd_transcribe(args) -> None:
         print() if args.stream else print(text)
 
 
+def cmd_bench(args) -> None:
+    import statistics
+    import time
+    import wave
+
+    config = load_config(args.config).server
+    url = args.server or config.url
+    token = args.token if args.token is not None else config.token
+    print(f"| Speech | First words | Full transcript |\n|---|---|---|")
+    for path in args.files:
+        data = Path(path).read_bytes()
+        with wave.open(path) as wav:
+            seconds = wav.getnframes() / wav.getframerate()
+        runs = []
+        for attempt in range(args.runs + 1):  # the first run warms up and is not counted
+            start = time.perf_counter()
+            first: list[float] = []
+            api.transcribe(url, data, token=token, on_delta=lambda _: first or first.append(time.perf_counter() - start))
+            total = time.perf_counter() - start
+            if attempt:
+                runs.append((first[0] if first else total, total))
+        first_ms = 1000 * statistics.median(r[0] for r in runs)
+        total_s = statistics.median(r[1] for r in runs)
+        print(f"| {seconds:.0f} s | {first_ms:.0f} ms | {total_s:.2f} s |")
+
+
 def cmd_check(args) -> None:
     config = load_config(args.config).server
     models = api.list_models(config.url, token=config.token)
@@ -90,6 +116,13 @@ def main(argv: list[str] | None = None) -> None:
     transcribe.set_defaults(func=cmd_transcribe)
 
     commands.add_parser("check", help="check that the server is reachable").set_defaults(func=cmd_check)
+
+    bench = commands.add_parser("bench", help="time the server on WAV files (median of several streamed runs)")
+    bench.add_argument("files", nargs="+")
+    bench.add_argument("--server", help="server URL (default: from the config file)")
+    bench.add_argument("--token", help="API token (default: from the config file)")
+    bench.add_argument("--runs", type=int, default=5)
+    bench.set_defaults(func=cmd_bench)
 
     install = commands.add_parser("install", help="write the config file and systemd user service")
     install.add_argument("--no-start", action="store_true", help="enable the service without starting it")

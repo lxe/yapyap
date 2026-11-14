@@ -28,6 +28,14 @@ yapyap-server --engine whispercpp
 
 The server listens on 127.0.0.1 unless you pass `--host 0.0.0.0`. `yapyap-server --help` lists the options. Each option can also be set with an environment variable: `YAPYAP_ENGINE`, `YAPYAP_MODEL`, `YAPYAP_DEVICE`, `YAPYAP_HOST`, `YAPYAP_PORT`, `YAPYAP_TOKEN`.
 
+## Benchmark
+
+`yapyap bench` sends 16 kHz WAV files to the server a few times each, with streaming on, and prints the median time to the first words and to the full transcript:
+
+```bash
+yapyap bench --server http://localhost:8122 --token "$YAPYAP_TOKEN" speech-05s.wav speech-10s.wav speech-20s.wav
+```
+
 ## API
 
 ```bash
