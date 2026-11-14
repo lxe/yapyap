@@ -246,7 +246,41 @@ type_line() {
   [ "$ack" = "done" ]
 }
 
+# Streaming state for "+piece" lines (see the read loop).
+STREAM_STARTED=0
+STREAM_TYPED=0
+STREAM_SKIP=0
+
+# Type one piece of a transcript the server is still decoding. The focused
+# window is looked up once, at the first piece.
+handle_piece() {
+  [ "$OUTPUT_MODE" = "type" ] && [ "$AUTO_PASTE" = "1" ] && [ -n "$HYPRCTL_BIN" ] || return 0
+  if [ "$STREAM_STARTED" != "1" ]; then
+    STREAM_STARTED=1
+    STREAM_TYPED=0
+    STREAM_SKIP=0
+    refresh_desktop_environment
+    read_active_window
+    if [ -z "$local_window_address" ]; then
+      STREAM_SKIP=1
+      printf 'yapyap: no active window address, not typing streamed transcript\\n' >&2
+      return 0
+    fi
+    printf 'yapyap: typing streamed transcript to class=%s address=%s\\n' \\
+      "${local_window_class:-unknown}" "$local_window_address" >&2
+  fi
+  [ "$STREAM_SKIP" = "1" ] && return 0
+  if type_line "$1"; then
+    STREAM_TYPED=1
+  else
+    STREAM_SKIP=1
+    printf 'yapyap: virtual keyboard typing failed mid-transcript\\n' >&2
+  fi
+}
+
 start_typer
+# Ask yapyap for "+piece" lines while the server streams, then "=transcript".
+export YAPYAP_STREAM_OUTPUT=1
 
 # Read transcripts in this shell (not a pipeline subshell) so the typer coprocess stays reachable.
 exec {YAPYAP_OUT}< <("$YAPYAP_BIN")
@@ -258,6 +292,28 @@ while IFS= read -r -u "$YAPYAP_OUT" line; do
   local_paste_shortcut=""
 
   [ -n "$line" ] || continue
+
+  case "$line" in
+    +*)
+      handle_piece "${line:1}"
+      continue
+      ;;
+    =*)
+      line="${line:1}"
+      if [ "$STREAM_TYPED" = "1" ]; then
+        # Already typed piece by piece; only update the clipboard.
+        STREAM_STARTED=0
+        STREAM_TYPED=0
+        refresh_desktop_environment
+        if [ -n "$WLCOPY_BIN" ] && ! "$WLCOPY_BIN" -- "$line"; then
+          printf 'yapyap: wl-copy failed for transcript\\n' >&2
+        fi
+        continue
+      fi
+      STREAM_STARTED=0
+      [ -n "$line" ] || continue
+      ;;
+  esac
 
   refresh_desktop_environment
 

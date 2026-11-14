@@ -221,12 +221,15 @@ def main() -> None:
             typed_at = time.perf_counter()
             typer.type_text(text)
             done_at = time.perf_counter()
-            log(
-                f"typed {len(text)} chars in {1000 * (done_at - typed_at):.0f} ms"
-                f" (modifier wait {1000 * (typed_at - start):.0f} ms,"
-                f" longest gap {1000 * typer.max_gap:.1f} ms,"
-                f" wtype {typer.unicode_runs}x {1000 * typer.unicode_time:.0f} ms)"
-            )
+            # Streamed transcripts arrive as many short pieces; log whole
+            # transcripts and anything unusual, not every piece.
+            if len(text) >= 40 or typer.max_gap > 0.02 or typer.unicode_runs:
+                log(
+                    f"typed {len(text)} chars in {1000 * (done_at - typed_at):.0f} ms"
+                    f" (modifier wait {1000 * (typed_at - start):.0f} ms,"
+                    f" longest gap {1000 * typer.max_gap:.1f} ms,"
+                    f" wtype {typer.unicode_runs}x {1000 * typer.unicode_time:.0f} ms)"
+                )
             # Tell a waiting caller this line is done.
             print("done", flush=True)
     except KeyboardInterrupt:

@@ -17,6 +17,10 @@ import tempfile
 
 REMOTE_HOST = os.environ.get("YAPYAP_REMOTE_HOST", "").strip() or None
 INPUT_DEVICE = os.environ.get("YAPYAP_INPUT_DEVICE", "").strip() or None
+# Set by the service runner: stdout lines become "+<piece>" while a remote
+# server streams the transcript, then "=<full transcript>". Without it, stdout
+# carries one plain line per transcript, as before.
+STREAM_OUTPUT = os.environ.get("YAPYAP_STREAM_OUTPUT", "").strip() == "1"
 
 # pywhispercpp installs libwhisper.so + libggml*.so into site-packages but the linker can't find them
 if not REMOTE_HOST and not ctypes.util.find_library("whisper"):
@@ -745,21 +749,41 @@ class VoiceRecorder:
             print("🎯 Transcribing...", file=sys.stderr)
             try:
                 transcribe_start = time.perf_counter()
-                text, _ = self.transcribe_audio(audio)
+                streamed = []
+
+                def emit_piece(piece):
+                    # The full transcript is stripped, so drop the leading
+                    # space Whisper puts before the first word.
+                    piece = piece.replace("\n", " ")
+                    if not streamed:
+                        piece = piece.lstrip()
+                        print(
+                            f"🎯 First words after {1000 * (time.perf_counter() - transcribe_start):.0f} ms",
+                            file=sys.stderr,
+                        )
+                    if piece:
+                        streamed.append(piece)
+                        print(f"+{piece}", flush=True)
+
+                text, _ = self.transcribe_audio(
+                    audio, on_delta=emit_piece if STREAM_OUTPUT else None
+                )
                 print(
                     f"🎯 Transcribed {len(audio) / WHISPER_SAMPLERATE:.1f} s of audio in "
                     f"{1000 * (time.perf_counter() - transcribe_start):.0f} ms",
                     file=sys.stderr,
                 )
 
+                if not text and streamed:
+                    text = "".join(streamed).strip()
                 if text:
-                    print(text, flush=True)
+                    print(f"={text}" if STREAM_OUTPUT else text, flush=True)
                 else:
                     print("(no speech detected)", file=sys.stderr)
             except Exception as e:
                 print(f"❌ Transcription error: {e}", file=sys.stderr)
                 if self.remote_host:
-                    print(REMOTE_UNREACHABLE_TEXT, flush=True)
+                    print(f"={REMOTE_UNREACHABLE_TEXT}" if STREAM_OUTPUT else REMOTE_UNREACHABLE_TEXT, flush=True)
                 else:
                     import traceback
                     traceback.print_exc()
@@ -788,9 +812,9 @@ class VoiceRecorder:
             else:
                 self.stop_recording()
 
-    def transcribe_audio(self, audio, trace=False):
+    def transcribe_audio(self, audio, trace=False, on_delta=None):
         if self.remote_host:
-            return self.transcribe_audio_remote(audio, trace=trace)
+            return self.transcribe_audio_remote(audio, trace=trace, on_delta=on_delta)
 
         start = time.perf_counter()
         with self.model_lock:
@@ -805,7 +829,7 @@ class VoiceRecorder:
         }
         return text, timings
 
-    def transcribe_audio_remote(self, audio, trace=False):
+    def transcribe_audio_remote(self, audio, trace=False, on_delta=None):
         encode_start = time.perf_counter()
         pcm16 = np.clip(audio, -1.0, 1.0)
         pcm16 = (pcm16 * 32767.0).astype(np.int16)
@@ -817,7 +841,7 @@ class VoiceRecorder:
             "channels": 1,
         }
         encode_time = time.perf_counter() - encode_start
-        response, client_timings = request_transcription(payload, host=self.remote_host)
+        response, client_timings = request_transcription(payload, host=self.remote_host, on_delta=on_delta)
         if "error" in response:
             raise RuntimeError(response["error"])
 

@@ -46,7 +46,16 @@ def tcp_bind_address():
     return parse_hostport(f"{host}:{port_text}")
 
 
-def request_transcription(payload, *, host=None, socket_path=SOCKET_PATH, timeout=30):
+def request_transcription(payload, *, host=None, socket_path=SOCKET_PATH, timeout=30, on_delta=None):
+    """Send one request and return (response, timings).
+
+    With on_delta, the request asks for streaming. A server that streams
+    answers with {"delta": ...} lines, each passed to on_delta, before its
+    final {"text": ...} line; a server that does not stream only sends the
+    final line, so callers need no special case.
+    """
+    if on_delta is not None:
+        payload = {**payload, "stream": True}
     if host:
         host_name, port = parse_hostport(host)
         family = socket.AF_INET
@@ -62,13 +71,23 @@ def request_transcription(payload, *, host=None, socket_path=SOCKET_PATH, timeou
         connect_time = time.perf_counter() - connect_start
         request_start = time.perf_counter()
         client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-        response = client.makefile("r", encoding="utf-8").readline()
+        reader = client.makefile("r", encoding="utf-8")
+        while True:
+            response = reader.readline()
+            if not response:
+                break
+            message = json.loads(response)
+            if "delta" in message and "text" not in message and "error" not in message:
+                if on_delta is not None:
+                    on_delta(message["delta"])
+                continue
+            break
         roundtrip_time = time.perf_counter() - request_start
 
     if not response:
         raise ConnectionError("No response received from transcription server")
 
-    return json.loads(response), {
+    return message, {
         "client_connect_s": connect_time,
         "client_request_roundtrip_s": roundtrip_time,
     }
