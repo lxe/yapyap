@@ -39,14 +39,25 @@ def test_types_ascii_and_lookalikes():
     assert all(c.args[0] == e.EV_KEY for c in typer.device.write.call_args_list)
 
 
-def test_unmappable_characters_go_to_wtype_in_order():
+def test_lines_with_non_us_characters_go_to_wtype_whole():
     typer = make_typer()
-    calls = []
-    typer.device.write.side_effect = lambda _t, code, value: calls.append(("key", code, value))
-    with mock.patch.object(hidtype.subprocess, "run", side_effect=lambda argv, check: calls.append(("wtype", argv[-1]))):
-        typer.type_text("café ok")
-    wtype_at = calls.index(("wtype", "é"))
-    before = [(c, v) for kind, *rest in calls[:wtype_at] if kind == "key" for c, v in [rest]]
-    after = [(c, v) for kind, *rest in calls[wtype_at + 1:] if kind == "key" for c, v in [rest]]
-    assert decode(before) == "caf"
-    assert decode(after) == " ok"
+    typer.wtype_settle_ms = 15
+    runs = []
+    with mock.patch.object(hidtype.subprocess, "run", side_effect=lambda argv, check: runs.append(argv)):
+        typer.type_text(" хочу говорить \u2014 по-русски")
+        typer.type_text("caf\u00e9 ok")
+    # One call per line, with the settle pause, and the original dash kept.
+    assert runs == [
+        ["/usr/bin/wtype", "-s", "15", "--", " хочу говорить \u2014 по-русски"],
+        ["/usr/bin/wtype", "-s", "15", "--", "caf\u00e9 ok"],
+    ]
+    typer.device.write.assert_not_called()
+
+
+def test_english_with_curly_quotes_stays_on_the_keyboard():
+    typer = make_typer()
+    with mock.patch.object(hidtype.subprocess, "run") as run:
+        typer.type_text("It\u2019s \u201cfine\u201d")
+    run.assert_not_called()
+    events = [(c.args[1], c.args[2]) for c in typer.device.write.call_args_list]
+    assert decode(events) == 'It\'s "fine"'

@@ -6,9 +6,10 @@ then reads transcripts from stdin, one per line, and types each one as real
 key presses. Keeping the device open avoids the delay a compositor needs to
 pick up a freshly created keyboard.
 
-Characters the US layout cannot produce are first mapped to ASCII look-alikes
-(curly quotes, dashes, ellipsis); anything left is handed to wtype, if
-installed, which types it through the Wayland virtual-keyboard protocol.
+Curly quotes, dashes and ellipses are mapped to ASCII look-alikes. A line
+with any other character the US layout cannot produce (Cyrillic, accents) is
+typed whole by wtype, if installed, through the Wayland virtual-keyboard
+protocol.
 """
 from __future__ import annotations
 
@@ -97,6 +98,10 @@ class Typer:
         self._refresh_watched()
         self.modifier_wait = env_float("YAPYAP_TYPE_MODIFIER_WAIT_S", 2.0)
         self.wtype = shutil.which("wtype")
+        # wtype uploads a new keymap on every call, and apps drop the first
+        # keys typed before they have loaded it: "Если хочу" came out as
+        # "сли очу". A pause after the upload fixed it in testing from 3 ms.
+        self.wtype_settle_ms = max(int(env_float("YAPYAP_WTYPE_SETTLE_MS", 15)), 0)
         # Compositors take a moment to register a new keyboard.
         time.sleep(env_float("YAPYAP_TYPE_SETTLE_S", 0.3))
 
@@ -175,19 +180,15 @@ class Typer:
         self.max_gap = 0.0
         self.unicode_runs = 0
         self.unicode_time = 0.0
-        text = text.translate(ASCII_LOOKALIKES)
-        pending_unicode: list[str] = []
-        for ch in text:
-            mapping = KEYMAP.get(ch)
-            if mapping is None:
-                pending_unicode.append(ch)
-                continue
-            if pending_unicode:
-                self._type_unicode("".join(pending_unicode))
-                pending_unicode.clear()
-            self._tap(*mapping)
-        if pending_unicode:
-            self._type_unicode("".join(pending_unicode))
+        ascii_text = text.translate(ASCII_LOOKALIKES)
+        if any(ch not in KEYMAP for ch in ascii_text):
+            # One wtype call for the whole line keeps keymap switches, and the
+            # keys apps drop around them, to one per line. wtype can type the
+            # original dashes and quotes, so skip the ASCII look-alikes.
+            self._type_unicode(text)
+            return
+        for ch in ascii_text:
+            self._tap(*KEYMAP[ch])
 
     def _type_unicode(self, text: str) -> None:
         # wtype goes through a different device; let our queued keys drain first.
@@ -197,7 +198,7 @@ class Typer:
             log(f"no wtype; dropped {text!r}")
             return
         start = time.perf_counter()
-        subprocess.run([self.wtype, "--", text], check=False)
+        subprocess.run([self.wtype, "-s", str(self.wtype_settle_ms), "--", text], check=False)
         self.unicode_runs += 1
         self.unicode_time += time.perf_counter() - start
         # Do not count the wtype call as a gap between our own key events.
