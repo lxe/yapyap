@@ -27,6 +27,8 @@ def make_typer():
     typer._last_emit = None
     typer.burst_pause = 0
     typer.wtype = "/usr/bin/wtype"
+    typer.layouts = mock.Mock(available=False, current=0, ru_group=None)
+    typer.group_settle = 0
     return typer
 
 
@@ -75,3 +77,35 @@ def test_queued_lines_are_typed_as_one_batch():
         lines.put(piece)
     assert hidtype.next_batch(lines) == [" сейчас", " я"]
     assert hidtype.next_batch(lines) is None
+
+
+
+def test_russian_is_typed_as_keys_in_the_ru_group():
+    typer = make_typer()
+    typer.layouts = mock.Mock(available=True, current=0, ru_group=1)
+    switches = []
+
+    def set_group(group):
+        switches.append(group)
+        typer.layouts.current = group
+
+    typer.layouts.set.side_effect = set_group
+    timeline = []
+    typer.device.write.side_effect = lambda _t, code, value: timeline.append((typer.layouts.current, code, value))
+    with mock.patch.object(hidtype.subprocess, "run") as run:
+        typer.type_text("Вышел зайчик погулять, OK. Ёж — 2.")
+        typer.type_text(" Дальше")
+        assert switches == [1, 0, 1]  # stays in "ru" between streamed pieces
+        typer.restore_layout()
+        typer.type_text(" and English.")
+    run.assert_not_called()
+    assert switches == [1, 0, 1, 0]
+    maps = {0: hidtype.KEYMAP, 1: hidtype.RU_KEYMAP}
+    reverse = {g: {(c, sh): ch for ch, (c, sh) in m.items()} for g, m in maps.items()}
+    shift, out = False, []
+    for group, code, value in timeline:
+        if code == hidtype.e.KEY_LEFTSHIFT:
+            shift = value == 1
+        elif value == 1:
+            out.append(reverse[group][(code, shift)])
+    assert "".join(out) == "Вышел зайчик погулять, OK. Ёж - 2. Дальше and English."

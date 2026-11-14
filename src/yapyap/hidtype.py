@@ -6,16 +6,21 @@ then reads transcripts from stdin, one per line, and types each one as real
 key presses. Keeping the device open avoids the delay a compositor needs to
 pick up a freshly created keyboard.
 
-Curly quotes, dashes and ellipses are mapped to ASCII look-alikes. A line
-with any other character the US layout cannot produce (Cyrillic, accents) is
-typed whole by wtype, if installed, through the Wayland virtual-keyboard
-protocol.
+Curly quotes, dashes and ellipses are mapped to ASCII look-alikes. Russian
+is typed as real keys too, on the same keyboard switched to Hyprland's "ru"
+layout group (LayoutSwitcher). A line with any other character the US layout
+cannot produce (accents, other scripts) is typed whole by wtype, if
+installed, through the Wayland virtual-keyboard protocol.
 """
 from __future__ import annotations
 
+import glob
+import json
 import os
 import queue
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -25,6 +30,8 @@ import evdev
 from evdev import UInput, ecodes as e
 
 DEVICE_NAME = "yapyap-virtual-keyboard"
+# After this long with nothing to type, switch the keyboard back to US.
+IDLE_RESTORE_S = 0.25
 
 MODIFIER_KEYS = {
     e.KEY_LEFTCTRL, e.KEY_RIGHTCTRL, e.KEY_LEFTALT, e.KEY_RIGHTALT,
@@ -58,7 +65,96 @@ ASCII_LOOKALIKES = str.maketrans({
     "–": "-", "—": "-", "−": "-", "‐": "-", "‑": "-",
     " ": " ", " ": " ", " ": " ",
     "…": "...",
+    "«": '"', "»": '"',
 })
+
+# The xkb "ru" layout (ЙЦУКЕН) on the same physical keys as KEYMAP. Typing
+# Cyrillic through these keys with the keyboard switched to its "ru" group is
+# as fast and reliable as English; see LayoutSwitcher.
+_RU_ROWS = [
+    ("йцукенгшщзхъ", [e.KEY_Q, e.KEY_W, e.KEY_E, e.KEY_R, e.KEY_T, e.KEY_Y, e.KEY_U, e.KEY_I, e.KEY_O, e.KEY_P, e.KEY_LEFTBRACE, e.KEY_RIGHTBRACE]),
+    ("фывапролджэ", [e.KEY_A, e.KEY_S, e.KEY_D, e.KEY_F, e.KEY_G, e.KEY_H, e.KEY_J, e.KEY_K, e.KEY_L, e.KEY_SEMICOLON, e.KEY_APOSTROPHE]),
+    ("ячсмитьбю", [e.KEY_Z, e.KEY_X, e.KEY_C, e.KEY_V, e.KEY_B, e.KEY_N, e.KEY_M, e.KEY_COMMA, e.KEY_DOT]),
+    ("ё", [e.KEY_GRAVE]),
+]
+RU_KEYMAP: dict[str, tuple[int, bool]] = {
+    **{ch: (code, False) for letters, codes in _RU_ROWS for ch, code in zip(letters, codes)},
+    **{ch.upper(): (code, True) for letters, codes in _RU_ROWS for ch, code in zip(letters, codes)},
+    **{str(d): (getattr(e, f"KEY_{d}"), False) for d in range(10)},
+    " ": (e.KEY_SPACE, False), "\t": (e.KEY_TAB, False), "\n": (e.KEY_ENTER, False),
+    "!": (e.KEY_1, True), '"': (e.KEY_2, True), "№": (e.KEY_3, True), ";": (e.KEY_4, True),
+    "%": (e.KEY_5, True), ":": (e.KEY_6, True), "?": (e.KEY_7, True), "*": (e.KEY_8, True),
+    "(": (e.KEY_9, True), ")": (e.KEY_0, True), "-": (e.KEY_MINUS, False), "_": (e.KEY_MINUS, True),
+    "=": (e.KEY_EQUAL, False), "+": (e.KEY_EQUAL, True), ".": (e.KEY_SLASH, False), ",": (e.KEY_SLASH, True),
+    "\\": (e.KEY_BACKSLASH, False), "/": (e.KEY_BACKSLASH, True),
+}
+
+
+class LayoutSwitcher:
+    """Switch the typing keyboards between Hyprland layout groups.
+
+    Needs a second "ru" layout in Hyprland (input kb_layout = "us,ru").
+    Our uinput keyboard is grabbed by keyd and comes out of keyd's virtual
+    keyboard, so both are switched. A group switch only changes the active
+    group; unlike wtype it sends no new keymap, so apps drop no keys.
+    """
+
+    NAMES = ("keyd-virtual-keyboard", DEVICE_NAME)
+
+    def __init__(self) -> None:
+        self.socket_path = self._find_socket()
+        self.devices: list[str] = []
+        self.ru_group: int | None = None
+        self.current = 0
+        devices = self._request("j/devices")
+        if devices:
+            try:
+                keyboards = json.loads(devices).get("keyboards", [])
+            except ValueError:
+                keyboards = []
+            for keyboard in keyboards:
+                if keyboard.get("name") in self.NAMES:
+                    self.devices.append(keyboard["name"])
+                    groups = [g.strip() for g in keyboard.get("layout", "").split(",")]
+                    if "ru" in groups:
+                        self.ru_group = groups.index("ru")
+        if not self.devices:
+            self.ru_group = None
+
+    @property
+    def available(self) -> bool:
+        return self.ru_group is not None
+
+    @staticmethod
+    def _find_socket() -> str | None:
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+        candidates = [f"{runtime}/hypr/{signature}/.socket.sock"] if signature else []
+        candidates += sorted(glob.glob(f"{runtime}/hypr/*/.socket.sock"), key=os.path.getmtime, reverse=True)
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return None
+
+    def _request(self, command: str) -> str | None:
+        if not self.socket_path:
+            return None
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(1.0)
+                client.connect(self.socket_path)
+                client.sendall(command.encode())
+                chunks = []
+                while chunk := client.recv(65536):
+                    chunks.append(chunk)
+            return b"".join(chunks).decode("utf-8", "replace")
+        except OSError:
+            return None
+
+    def set(self, group: int) -> None:
+        commands = ";".join(f"switchxkblayout {name} {group}" for name in self.devices)
+        self._request(f"[[BATCH]]{commands}")
+        self.current = group
 
 
 def env_float(name: str, default: float) -> float:
@@ -100,6 +196,12 @@ class Typer:
         self._refresh_watched()
         self.modifier_wait = env_float("YAPYAP_TYPE_MODIFIER_WAIT_S", 2.0)
         self.wtype = shutil.which("wtype")
+        self.layouts = LayoutSwitcher()
+        if self.layouts.available:
+            self.layouts.set(0)
+        # Time for keys already sent to pass through keyd and the compositor
+        # before the layout group changes under them.
+        self.group_settle = env_float("YAPYAP_GROUP_SETTLE_MS", 12.0) / 1000.0
         # wtype brings its own keymap, and under Hyprland the app only
         # switches to it when wtype's first key arrives, so that first key
         # is lost: "Если хочу" came out as "сли очу", and every streamed
@@ -110,6 +212,8 @@ class Typer:
         time.sleep(env_float("YAPYAP_TYPE_SETTLE_S", 0.3))
 
     def close(self) -> None:
+        if self.layouts.available and self.layouts.current != 0:
+            self.layouts.set(0)
         for device in self.watched.values():
             device.close()
         self.device.close()
@@ -185,6 +289,16 @@ class Typer:
         self.unicode_runs = 0
         self.unicode_time = 0.0
         ascii_text = text.translate(ASCII_LOOKALIKES)
+        if (
+            self.layouts.available
+            and any(ch in RU_KEYMAP and ch not in KEYMAP for ch in ascii_text)
+            and all(ch in RU_KEYMAP or ch in KEYMAP for ch in ascii_text)
+        ):
+            self._type_with_groups(ascii_text)
+            return
+        # Everything below types with US key positions.
+        if self.layouts.available:
+            self._switch_group(0)
         if any(ch not in KEYMAP for ch in ascii_text):
             # One wtype call for the whole line keeps keymap switches, and the
             # keys apps drop around them, to one per line. wtype can type the
@@ -193,6 +307,39 @@ class Typer:
             return
         for ch in ascii_text:
             self._tap(*KEYMAP[ch])
+
+    def _switch_group(self, group: int) -> None:
+        if self.layouts.current == group:
+            return
+        time.sleep(self.group_settle)
+        self.layouts.set(group)
+        self._sent = 0
+
+    def _type_with_groups(self, text: str) -> None:
+        """Type mixed Russian and English as real keys, switching layout groups.
+
+        Characters both layouts have (digits, space, most punctuation) stay
+        in whichever group is active. The keyboard stays in "ru" afterwards,
+        so streamed Russian pieces need no switch each; restore_layout()
+        switches back once typing goes idle.
+        """
+        ru = self.layouts.ru_group
+        for ch in text:
+            if self.layouts.current == ru and ch in RU_KEYMAP:
+                self._tap(*RU_KEYMAP[ch])
+            elif self.layouts.current != ru and ch in KEYMAP:
+                self._tap(*KEYMAP[ch])
+            elif ch in RU_KEYMAP:
+                self._switch_group(ru)
+                self._tap(*RU_KEYMAP[ch])
+            else:
+                self._switch_group(0)
+                self._tap(*KEYMAP[ch])
+
+    def restore_layout(self) -> None:
+        """Put the keyboard back on the US group, as the user's keys expect."""
+        if self.layouts.available:
+            self._switch_group(0)
 
     def _type_unicode(self, text: str) -> None:
         # wtype goes through a different device; let our queued keys drain first.
@@ -231,9 +378,12 @@ def read_lines(fd: int, lines: queue.Queue) -> None:
             print("done", flush=True)
 
 
-def next_batch(lines: queue.Queue) -> list[str] | None:
-    """Block for one line, then take every line already queued behind it."""
-    first = lines.get()
+def next_batch(lines: queue.Queue, timeout: float | None = None) -> list[str] | None:
+    """Wait for one line, then take every line already queued behind it.
+
+    Raises queue.Empty if no line arrives within timeout.
+    """
+    first = lines.get(timeout=timeout)
     if first is None:
         return None
     batch = [first]
@@ -255,10 +405,21 @@ def main() -> None:
         log(f"cannot create virtual keyboard: {exc}")
         sys.exit(1)
     log(f"ready ({DEVICE_NAME})")
+    # Exit through `finally` on SIGTERM too (systemd stop/restart), so the
+    # keyboard is never left on the "ru" layout group.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     lines: queue.Queue = queue.Queue()
     threading.Thread(target=read_lines, args=(0, lines), daemon=True).start()
     try:
-        while (batch := next_batch(lines)) is not None:
+        while True:
+            try:
+                batch = next_batch(lines, timeout=IDLE_RESTORE_S)
+            except queue.Empty:
+                # Typing went idle: give the user's keyboard its US layout back.
+                typer.restore_layout()
+                continue
+            if batch is None:
+                break
             # Pieces that queued up while the last batch was typed go out
             # together: one wtype call for several Russian words instead of
             # one per word.
