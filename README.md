@@ -8,15 +8,17 @@ Whisper runs on a server, which can be your own machine or another one on your n
 
 ## Features
 
-**Fast.** On an Intel Core Ultra (Lunar Lake) machine with integrated Arc 140V graphics, the first words get typed about 250 ms after you let go of the keys. The server streams text while Whisper decodes it, so a 20-second sentence is fully typed about half a second after you stop talking.
+**Fast.** Time from letting go of the keys until the first words are typed, and until the whole transcript is in, with the default model:
 
-| Speech length | First words typed | Full transcript |
-|---|---|---|
-| 6 s | 250 ms | 0.33 s |
-| 12 s | 255 ms | 0.42 s |
-| 20 s | 270 ms | 0.52 s |
+| Server GPU | Engine | 5 s of speech | 10 s | 20 s |
+|---|---|---|---|---|
+| NVIDIA RTX 5090 | whisper.cpp, Q8 | 76 ms | 90 ms | 106 ms |
+| NVIDIA RTX 3090 | whisper.cpp, Q8 | 216 ms | 234 ms | 263 ms |
+| Intel Arc 140V (integrated) | OpenVINO, FP16 | 216 ms, all in 0.27 s | 231 ms, all in 0.35 s | 225 ms, all in 0.47 s |
 
-**Multilingual.** The default model is [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo), which covers 99 languages and detects the language of each recording. I've used it every day for over a year. I've tested newer models, including Qwen3-ASR and Parakeet, and none of them matched it on both speed and accuracy on this hardware.
+On NVIDIA GPUs the whole transcript arrives with the first words. On the Arc, the server streams text while Whisper decodes it, so typing starts before the transcript is complete. Each figure is the median of five runs of `yapyap bench`, with the 3090 and the Arc reached over the local network.
+
+**Multilingual.** The default model is [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo), which covers 99 languages and detects the language of each recording. I've used it every day for over a year. I've tested newer models, including Qwen3-ASR and Parakeet, and none of them matched it on both speed and accuracy on the Arc.
 
 **Real key presses.** Yap Yap types through a virtual keyboard, the same way a USB keyboard would. No paste shortcuts are involved, and the text lands in any window that accepts typing, including terminals, remote desktops and games.
 
