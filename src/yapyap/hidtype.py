@@ -77,9 +77,12 @@ class Typer:
         # buffers 64 events per reader (keyd, then the compositor), and big
         # bursts lose keys: 64 events per burst dropped ~30% of characters and
         # 32 occasionally dropped one, while 16 (4 plain characters) lost none
-        # in 8,400 characters. That still types ~3,400 characters a second.
+        # in 8,400 characters.
+        # A 4 ms pause types ~1,000 characters a second. At 1 ms (~3,400 a
+        # second) Electron apps such as Claude fall behind and redraw the text
+        # in two pieces; at 4 ms the text appears smoothly as it is typed.
         self.burst_events = max(int(env_float("YAPYAP_TYPE_BURST_EVENTS", 16)), 4)
-        self.burst_pause = env_float("YAPYAP_TYPE_BURST_PAUSE_MS", 1.0) / 1000.0
+        self.burst_pause = env_float("YAPYAP_TYPE_BURST_PAUSE_MS", 4.0) / 1000.0
         self._sent = 0
         self._last_emit: float | None = None
         self.max_gap = 0.0
