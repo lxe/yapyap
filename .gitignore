@@ -64,3 +64,6 @@ venv.bak/
 # OS
 .DS_Store
 Thumbs.db
+
+# docker compose settings (holds the API token)
+.env

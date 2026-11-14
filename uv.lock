@@ -703,11 +703,11 @@ wheels = [
 name = "yapyap"
 version = "0.2.0"
 source = { editable = "." }
-dependencies = [
-    { name = "evdev" },
-]
 
 [package.optional-dependencies]
+client = [
+    { name = "evdev" },
+]
 openvino = [
     { name = "huggingface-hub" },
     { name = "numpy" },
@@ -738,7 +738,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "evdev", specifier = ">=2.0.0" },
+    { name = "evdev", marker = "extra == 'client'", specifier = ">=2.0.0" },
     { name = "huggingface-hub", marker = "extra == 'openvino'", specifier = ">=2.4.0" },
     { name = "numpy", marker = "extra == 'server'", specifier = ">=2.5.4" },
     { name = "openvino-genai", marker = "extra == 'openvino'", specifier = ">=2026.4.1.0" },
@@ -749,7 +749,7 @@ requires-dist = [
     { name = "yapyap", extras = ["server"], marker = "extra == 'openvino'" },
     { name = "yapyap", extras = ["server"], marker = "extra == 'whispercpp'" },
 ]
-provides-extras = ["server", "openvino", "whispercpp"]
+provides-extras = ["client", "server", "openvino", "whispercpp"]
 
 [package.metadata.requires-dev]
 dev = [

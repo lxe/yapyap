@@ -8,11 +8,12 @@ authors = [
 ]
 license = "MIT"
 requires-python = ">=3.12"
-dependencies = [
-    "evdev>=2.0.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
+client = [
+    "evdev>=2.0.0",
+]
 server = [
     "numpy>=2.5.4",
     "starlette>=1.10.0",
