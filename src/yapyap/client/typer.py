@@ -1,18 +1,17 @@
 """Type text as key presses on a virtual uinput keyboard.
 
 Text goes out as real key events, so it works in any app that takes keyboard
-input, including terminals, remote desktops and games. Curly quotes, dashes
-and ellipses become ASCII look-alikes.
-
-Text in another script is typed as real keys too when the compositor has a
-matching layout group and the typer knows that layout: under Hyprland with
-`kb_layout = "us,ru"`, Russian goes out on the ЙЦУКЕН keys with the keyboard
-switched to the "ru" group. Anything else is typed by wtype, if installed,
-through the Wayland virtual-keyboard protocol.
+input, including terminals, remote desktops and games. The typer reads the
+keyboard layouts the compositor uses (with libxkbcommon) and presses the keys
+that produce each character, with Shift and AltGr as needed. Under Hyprland,
+text in another configured layout, such as Russian with kb_layout =
+"us,ru", is typed by switching the keyboards to that layout group. Anything
+no layout can type goes through wtype, if installed.
 """
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -23,6 +22,7 @@ from evdev import UInput, ecodes as e
 from . import hyprland
 from .config import OutputConfig
 from .session import wayland_env
+from .xkb import RIGHT_ALT, Layout, Stroke, load_layouts
 
 log = logging.getLogger("yapyap")
 
@@ -63,35 +63,35 @@ ASCII_LOOKALIKES = str.maketrans({
     "«": '"', "»": '"',
 })
 
-# The xkb "ru" layout (ЙЦУКЕН) on the same physical keys as KEYMAP.
-_RU_ROWS = [
-    ("йцукенгшщзхъ", [e.KEY_Q, e.KEY_W, e.KEY_E, e.KEY_R, e.KEY_T, e.KEY_Y, e.KEY_U, e.KEY_I, e.KEY_O, e.KEY_P, e.KEY_LEFTBRACE, e.KEY_RIGHTBRACE]),
-    ("фывапролджэ", [e.KEY_A, e.KEY_S, e.KEY_D, e.KEY_F, e.KEY_G, e.KEY_H, e.KEY_J, e.KEY_K, e.KEY_L, e.KEY_SEMICOLON, e.KEY_APOSTROPHE]),
-    ("ячсмитьбю", [e.KEY_Z, e.KEY_X, e.KEY_C, e.KEY_V, e.KEY_B, e.KEY_N, e.KEY_M, e.KEY_COMMA, e.KEY_DOT]),
-    ("ё", [e.KEY_GRAVE]),
-]
-RU_KEYMAP: dict[str, tuple[int, bool]] = {
-    **{ch: (code, False) for letters, codes in _RU_ROWS for ch, code in zip(letters, codes)},
-    **{ch.upper(): (code, True) for letters, codes in _RU_ROWS for ch, code in zip(letters, codes)},
-    **{str(d): (getattr(e, f"KEY_{d}"), False) for d in range(10)},
-    " ": (e.KEY_SPACE, False), "\t": (e.KEY_TAB, False), "\n": (e.KEY_ENTER, False),
-    "!": (e.KEY_1, True), '"': (e.KEY_2, True), "№": (e.KEY_3, True), ";": (e.KEY_4, True),
-    "%": (e.KEY_5, True), ":": (e.KEY_6, True), "?": (e.KEY_7, True), "*": (e.KEY_8, True),
-    "(": (e.KEY_9, True), ")": (e.KEY_0, True), "-": (e.KEY_MINUS, False), "_": (e.KEY_MINUS, True),
-    "=": (e.KEY_EQUAL, False), "+": (e.KEY_EQUAL, True), ".": (e.KEY_SLASH, False), ",": (e.KEY_SLASH, True),
-    "\\": (e.KEY_BACKSLASH, False), "/": (e.KEY_BACKSLASH, True),
-}
+# Used only when libxkbcommon is missing.
+US_LAYOUT = Layout("us", {ch: Stroke(code, shift) for ch, (code, shift) in KEYMAP.items()}, None)
 
 
-
-# Layouts the typer can type as real keys, by xkb layout name.
-LAYOUT_KEYMAPS: dict[str, dict[str, tuple[int, bool]]] = {"ru": RU_KEYMAP}
+def detect_layouts() -> tuple[list[Layout], bool]:
+    """The compositor's layout groups, and whether the typer can switch between them."""
+    hypr = hyprland.keyboard_layout()
+    if hypr:
+        layout, variant, options = hypr
+    else:
+        layout = os.environ.get("XKB_DEFAULT_LAYOUT", "us")
+        variant = os.environ.get("XKB_DEFAULT_VARIANT", "")
+        options = os.environ.get("XKB_DEFAULT_OPTIONS", "")
+    try:
+        layouts = load_layouts(layout, variant, options)
+    except (OSError, ValueError) as exc:
+        log.warning("cannot read keyboard layout %r (%s); typing with a US layout", layout, exc)
+        return [US_LAYOUT], False
+    return layouts, hypr is not None and len(layouts) > 1
 
 
 class Typer:
-    def __init__(self, config: OutputConfig) -> None:
-        keys = sorted({code for code, _ in KEYMAP.values()} | {e.KEY_LEFTSHIFT})
-        self.device = UInput({e.EV_KEY: keys}, name=DEVICE_NAME)
+    def __init__(self, config: OutputConfig, layouts: list[Layout] | None = None, can_switch: bool | None = None) -> None:
+        if layouts is None:
+            layouts, can_switch = detect_layouts()
+        self.layouts = layouts
+        self.can_switch = bool(can_switch)
+        codes = {stroke.code for layout in layouts for stroke in layout.strokes.values()}
+        self.device = UInput({e.EV_KEY: sorted(codes | {e.KEY_LEFTSHIFT, RIGHT_ALT})}, name=DEVICE_NAME)
         # Events go out in bursts with a short pause between them. The kernel
         # buffers 64 events per reader (a key remapper such as keyd, then the
         # compositor), and bursts of 32 or more events lost keys in testing;
@@ -114,15 +114,11 @@ class Typer:
         self.watched: dict[str, evdev.InputDevice] = {}
         self.ignored: set[str] = set()
         self._refresh_watched()
-        # Extra layouts this compositor offers that the typer can type.
-        groups = hyprland.layout_groups()
-        self.layouts = {
-            index: LAYOUT_KEYMAPS[name] for index, name in enumerate(groups) if index and name in LAYOUT_KEYMAPS
-        }
         self.group = 0
-        if self.layouts:
+        if self.can_switch:
             hyprland.switch_layout_group(0)
-            log.info("typing %s as keys through layout groups", ", ".join(groups[i] for i in self.layouts))
+        log.info("typing with keyboard layout%s %s", "s" if len(layouts) > 1 else "",
+                 ", ".join(layout.name for layout in (layouts if self.can_switch else layouts[:1])))
         # Compositors take a moment to register a new keyboard.
         time.sleep(0.3)
 
@@ -141,13 +137,17 @@ class Typer:
             time.sleep(self.burst_pause)
             self._sent = 0
 
-    def _tap(self, code: int, shifted: bool) -> None:
-        if shifted:
+    def _tap(self, stroke: Stroke) -> None:
+        if stroke.level3:
+            self._emit(RIGHT_ALT, 1)
+        if stroke.shift:
             self._emit(e.KEY_LEFTSHIFT, 1)
-        self._emit(code, 1)
-        self._emit(code, 0)
-        if shifted:
+        self._emit(stroke.code, 1)
+        self._emit(stroke.code, 0)
+        if stroke.shift:
             self._emit(e.KEY_LEFTSHIFT, 0)
+        if stroke.level3:
+            self._emit(RIGHT_ALT, 0)
 
     def _refresh_watched(self) -> None:
         paths = set(evdev.list_devices())
@@ -191,24 +191,41 @@ class Typer:
                 return
             time.sleep(0.005)
 
+    def _stroke(self, ch: str, group: int) -> tuple[int, Stroke] | None:
+        """The group and keys for one character, staying in `group` when it can."""
+        groups = range(len(self.layouts)) if self.can_switch else range(1)
+        order = [group, 0, *groups]
+        for candidate in order:
+            if candidate in groups:
+                stroke = self.layouts[candidate].strokes.get(ch)
+                if stroke:
+                    return candidate, stroke
+        return None
+
     def type_text(self, text: str) -> None:
-        ascii_text = text.translate(ASCII_LOOKALIKES)
-        for group, keymap in self.layouts.items():
-            if any(ch in keymap and ch not in KEYMAP for ch in ascii_text) and all(
-                ch in keymap or ch in KEYMAP for ch in ascii_text
-            ):
-                self._type_with_group(ascii_text, group, keymap)
-                return
-        # Everything below types with the first (US) group's key positions.
-        self.restore_layout()
-        if all(ch in KEYMAP for ch in ascii_text):
-            for ch in ascii_text:
-                self._tap(*KEYMAP[ch])
-        else:
-            # One wtype call for the whole text keeps keymap changes, and the
-            # keys apps drop around them, to one. wtype can type the original
-            # dashes and quotes, so skip the ASCII look-alikes.
-            self._type_wtype(text)
+        """Type text as keys; characters no layout can produce go through wtype."""
+        plan: list[tuple[int, Stroke] | str] = []
+        group = self.group
+        for ch in text:
+            # A curly quote, dash or ellipsis that no layout has becomes ASCII.
+            for option in (ch, ch.translate(ASCII_LOOKALIKES)):
+                steps = [self._stroke(c, group) for c in option]
+                if None not in steps:
+                    plan += steps
+                    group = steps[-1][0]
+                    break
+            else:
+                # Neighbouring characters for wtype go out in one call.
+                if plan and isinstance(plan[-1], str):
+                    plan[-1] += ch
+                else:
+                    plan.append(ch)
+        for step in plan:
+            if isinstance(step, str):
+                self._type_wtype(step)
+            else:
+                self._switch_group(step[0])
+                self._tap(step[1])
 
     def _switch_group(self, group: int) -> None:
         if self.group == group:
@@ -218,29 +235,14 @@ class Typer:
         self.group = group
         self._sent = 0
 
-    def _type_with_group(self, text: str, group: int, keymap: dict[str, tuple[int, bool]]) -> None:
-        """Type text mixing another layout with English, switching groups.
-
-        Characters both layouts have (digits, space, most punctuation) stay
-        in whichever group is active. The keyboard stays in the other group
-        afterwards, so streamed pieces need no switch each; the caller runs
-        restore_layout() once typing goes idle.
-        """
-        for ch in text:
-            if self.group == group and ch in keymap:
-                self._tap(*keymap[ch])
-            elif self.group != group and ch in KEYMAP:
-                self._tap(*KEYMAP[ch])
-            elif ch in keymap:
-                self._switch_group(group)
-                self._tap(*keymap[ch])
-            else:
-                self._switch_group(0)
-                self._tap(*KEYMAP[ch])
-
     def restore_layout(self) -> None:
-        """Put every keyboard back on the first layout group."""
-        if self.layouts:
+        """Put every keyboard back on the first layout group.
+
+        After typing in another group the keyboard stays there, so streamed
+        pieces need no switch each; the caller restores it once typing goes
+        idle.
+        """
+        if self.can_switch:
             self._switch_group(0)
 
     def _type_wtype(self, text: str) -> None:
@@ -248,7 +250,7 @@ class Typer:
         time.sleep(self.burst_pause)
         self._sent = 0
         if not self.wtype:
-            log.warning("cannot type %r: install wtype for characters outside the keyboard layout", text)
+            log.warning("cannot type %r: install wtype for characters outside the keyboard layouts", text)
             return
         subprocess.run(
             [self.wtype, "-k", "Shift_L", "-s", str(self.wtype_settle_ms), "--", text],

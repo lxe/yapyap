@@ -6,7 +6,7 @@ FROM ${BASE}
 ARG CUDA
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg build-essential cmake git \
-       $( [ "$CUDA" = "1" ] && echo python3 python3-pip python3-venv ) \
+       $( [ "$CUDA" = "1" ] && echo python3 python3-dev python3-venv ) \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md LICENSE /src/

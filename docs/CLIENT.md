@@ -17,7 +17,7 @@
 
 ## Output modes
 
-`type` presses keys on a virtual keyboard. The text appears as fast as Whisper decodes it, at about 1,000 characters a second. `paste` copies each transcript and presses the paste shortcut in the focused window, on Hyprland only. `stdout` prints one line per transcript:
+`type` presses keys on a virtual keyboard. The text appears as fast as Whisper decodes it, at about 1,000 characters a second. Yap Yap uses [libxkbcommon](https://xkbcommon.org) to work out which keys type each character in your layouts, including Shift and AltGr. On Hyprland it also switches between layout groups. `paste` copies each transcript and presses the paste shortcut in the focused window, on Hyprland only. `stdout` prints one line per transcript:
 
 ```bash
 yapyap run | while read -r line; do notify-send "$line"; done

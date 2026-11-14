@@ -53,14 +53,13 @@ def active_window() -> tuple[str, str] | None:
     return (window.get("class") or "").lower(), window["address"]
 
 
-def layout_groups() -> list[str]:
-    """Layouts configured as xkb groups (input kb_layout), e.g. ["us", "ru"]."""
+def keyboard_layout() -> tuple[str, str, str] | None:
+    """(layout, variant, options) of the keyboards, e.g. ("us,ru", ",", "compose:caps")."""
     devices = _json("devices") or {}
     for keyboard in devices.get("keyboards", []):
-        layout = keyboard.get("layout")
-        if layout:
-            return [group.strip() for group in layout.split(",")]
-    return []
+        if keyboard.get("layout"):
+            return keyboard["layout"], keyboard.get("variant", ""), keyboard.get("options", "")
+    return None
 
 
 def switch_layout_group(group: int) -> None:

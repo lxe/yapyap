@@ -57,7 +57,7 @@ Whisper runs on a server, which can be your own machine or another one on your n
 
 ## Use it
 
-Hold the keys, talk, and let go. For accented letters and other scripts, install [wtype](https://github.com/atx/wtype). On [Hyprland](https://hyprland.org), you can add Russian as a second keyboard layout (`kb_layout = us,ru`), and Russian will type as fast as English.
+Hold the keys, talk, and let go. Yap Yap reads your keyboard layouts, so it types any language that one of them covers. On [Hyprland](https://hyprland.org) you can configure up to four layouts, such as `kb_layout = us,ru,de,gr`, and Yap Yap switches to the right layout for each word. Characters that none of your layouts can type, such as Chinese or letters that need a dead key, go through [wtype](https://github.com/atx/wtype) if it's installed.
 
 `yapyap transcribe file.ogg` transcribes an audio file.
 
