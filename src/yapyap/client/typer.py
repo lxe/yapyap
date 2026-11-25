@@ -94,10 +94,10 @@ class Typer:
         self.device = UInput({e.EV_KEY: sorted(codes | {e.KEY_LEFTSHIFT, RIGHT_ALT})}, name=DEVICE_NAME)
         # Events go out in bursts with a short pause between them. The kernel
         # buffers 64 events per reader (a key remapper such as keyd, then the
-        # compositor), and bursts of 32 or more events lost keys in testing;
-        # 16 (4 plain characters) lost none. A 4 ms pause types about 1,000
-        # characters a second, slow enough for Electron apps to redraw the
-        # text as it grows instead of in one jump.
+        # compositor), and bursts of 64 events lost keys in testing; 16 (4
+        # plain characters) lost none up to a 0.25 ms pause (12,600 keys a
+        # second). The default 1 ms pause types about 3,700 keys a second and
+        # leaves room for the compositor to stall briefly without losing keys.
         self.burst_events = max(int(config.burst_events), 4)
         self.burst_pause = config.burst_pause_ms / 1000.0
         # Time for keys already sent to reach the compositor before the

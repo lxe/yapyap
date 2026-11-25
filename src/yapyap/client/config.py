@@ -36,7 +36,7 @@ class OutputConfig:
     mode: str = "type"  # type, paste or stdout
     clipboard: bool = True  # also copy every transcript to the clipboard
     burst_events: int = 16
-    burst_pause_ms: float = 4.0
+    burst_pause_ms: float = 1.0
     wtype_settle_ms: float = 30.0
     group_settle_ms: float = 12.0
 
